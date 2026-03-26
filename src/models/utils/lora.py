@@ -52,3 +52,14 @@ class LoRALinear(nn.Module):
 
         # simply adds on
         return base + self.scale * (global_res + local_res)
+
+    # anticipate needed to return and load the global lora for communication
+    def global_state(self):
+        """
+        Returns dictionary of "A": global LoRA A and "B": global LoRA B
+        """
+        return {"A": self.global_A.data.clone(), "B": self.global_B.data.clone()}
+
+    def load_global_state(self, state):
+        self.global_A.data.copy_(state["A"])
+        self.global_B.data.copy_(state["B"])
