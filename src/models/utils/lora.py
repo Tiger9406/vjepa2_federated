@@ -63,3 +63,49 @@ class LoRALinear(nn.Module):
     def load_global_state(self, state):
         self.global_A.data.copy_(state["A"])
         self.global_B.data.copy_(state["B"])
+
+def inject_lora(model, r=8, alpha = 16.0, target_modules=("qkv", "proj", "fc1", "fc2")):
+    """
+    Replaces all nn.Linear with LoRALinear
+    """
+
+    for name, module in list(model.named_modules()):
+        for target in target_modules:
+            if target in name and isinstance(module, nn.Linear):
+                # Navigate to parent and replace
+                parts = name.split(".")
+                parent = model
+                for part in parts[:-1]:
+                    parent = getattr(parent, part)
+                original_linear = getattr(parent, parts[-1])
+                lora_layer = LoRALinear(original_linear, r=r, alpha=alpha)
+                setattr(parent, parts[-1], lora_layer)
+                break
+    return model
+
+def freeze_non_lora(model):
+    """
+    Freeze all parameters in backbone that's not lora adapter
+    """
+
+    for name, param in model.named_parameters():
+        if "global_A" in name or "global_B" in name or "local_A" in name or "local_B" in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
+
+def collect_global_lora_state(model):
+    """
+    Return {layer_name: {"A": global lora weights, "B": weights}} for all loralinear layers
+    """
+    state = {}
+    for name, module in model.named_modules():
+        if isinstance(module, LoRALinear):
+            state[name] = module.global_state()
+    return state
+
+def load_global_lora_state(model, state):
+    """Once processed, load the aggregated global lora back into the model"""
+    for name, module in model.named_modules():
+        if isinstance(module, LoRALinear) and name in state:
+            module.load_global_state(state[name])
