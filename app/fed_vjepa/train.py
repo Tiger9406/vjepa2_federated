@@ -11,12 +11,23 @@ Then next round
 
 """
 
+import copy
 import torch
 import torch.nn.functional as F
 
 from app.vjepa.utils import init_video_model
+from app.vjepa.transforms import make_transforms
 from src.masks.utils import apply_masks
-from src.models.utils.lora import collect_global_lora_state
+from src.masks.multiseq_multiblock3d import MaskCollator
+from src.datasets.data_manager import init_data
+from src.models.utils.lora import (
+    collect_global_lora_state,
+    inject_lora,
+    freeze_non_lora,
+    load_global_lora_state,
+    collect_local_lora_state,
+    load_local_lora_state,
+)
 from src.utils.logging import AverageMeter, get_logger
 
 logger = get_logger(__name__)
@@ -150,7 +161,11 @@ def local_train(
                 f"[Client {client_id}] step {step}/{local_steps}  loss={loss_meter.avg:.4f}"
             )
 
-    return collect_global_lora_state(encoder)
+    return collect_global_lora_state(encoder), collect_local_lora_state(encoder)
+
+def fedavg(client_states):
+    # TODO
+    return client_states
 
 
 def main(args, resume_preempt=False):
@@ -165,11 +180,13 @@ def main(args, resume_preempt=False):
     lora_alpha = args.get("lora_alpha", 16.0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    cfgs_data = {}
-    cfgs_model = {}
+    cfgs_data = args["data"]
+    cfgs_model = args["model"]
+    cfgs_mask = args["mask"]
+    federated_cfgs = args["federated"]
 
     # load encoder
-    encoder, _ = init_video_model(
+    encoder, predictor = init_video_model(
         device=device,
         patch_size=cfgs_data["patch_size"],
         max_num_frames=max(cfgs_data["dataset_fpcs"]),
@@ -178,24 +195,127 @@ def main(args, resume_preempt=False):
         crop_size=cfgs_data["crop_size"],
         pred_depth=cfgs_model["pred_depth"],
         pred_embed_dim=cfgs_model["pred_embed_dim"],
+        uniform_power=cfgs_model.get("uniform_power", False),
         use_mask_tokens=cfgs_model.get("use_mask_tokens", True),
+        num_mask_tokens=int(len(cfgs_mask) * len(cfgs_data["dataset_fpcs"])),
+        zero_init_mask_tokens=cfgs_model.get("zero_init_mask_tokens", True),
         use_rope=cfgs_model.get("use_rope", True),
         use_sdpa=args.get("meta", {}).get("use_sdpa", True),
     )
 
-    federated_cfgs = {}
-
     # load checkpoint of federated training
     pretrain_ckpt = federated_cfgs["pretrain_checkpoint"]
     ckpt = torch.load(pretrain_ckpt, map_location="cpu")
-    # TODO: then we actually load the checkpoints into encoder
-    print(ckpt.keys())
-    print(list(ckpt["encoder"].keys())[:5])
+    def _clean(sd):
+        return {k.replace("module.", "").replace("backbone.", ""): v for k, v in sd.items()}
 
-    # TODO: Add lora to encoder
+    encoder.load_state_dict(_clean(ckpt["encoder"]), strict=False)
+    predictor.load_state_dict(_clean(ckpt["predictor"]), strict=False)
+    logger.info("Loaded pretrained encoder and predictor")
 
-    # TODO: Freeze everything except for LoRA
+    inject_lora(encoder, r=lora_r, alpha=lora_alpha)
+    inject_lora(predictor, r=lora_r, alpha=lora_alpha)
+    freeze_non_lora(encoder)
+    freeze_non_lora(predictor)
 
-    # TODO: create teacher encoder that's copy
+    trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in encoder.parameters())
+    logger.info(f"Trainable: {trainable:, } / {total:, } ({100*trainable/total:.2f}%)")
 
-    # TODO: Should be ready to do individual clients
+    transform = make_transforms(
+        random_horizontal_flip=True,
+        random_resize_aspect_ratio=cfgs_data.get("random_resize_aspect_ratio", [3/4, 4/3]),
+        random_resize_scale=cfgs_data.get("random_resize_scale", [0.3, 1.0]),
+        reprob=cfgs_data.get("reprob", 0.0),
+        auto_augment=cfgs_data.get("auto_augment", False),
+        motion_shift=cfgs_data.get("motion_shift", False),
+        crop_size=cfgs_data["crop_size"],
+    )
+
+    mask_collator = MaskCollator(
+        cfgs_mask=cfgs_mask,
+        dataset_fpcs=cfgs_data["dataset_fpcs"],
+        crop_size=cfgs_data["crop_size"],
+        patch_size=cfgs_data["patch_size"],
+        tubelet_size=cfgs_data["tubelet_size"],
+    )
+
+    # per client data loader
+    client_loaders = []
+    for i in range(num_clients):
+        loader, _ = init_data(
+            data=cfgs_data.get("dataset_type", "videodataset"),
+            root_path=cfgs_data["client_datasets"][i],
+            batch_size=cfgs_data["batch_size"],
+            training=True,
+            dataset_fpcs=cfgs_data["dataset_fpcs"],
+            fps=cfgs_data.get("fps"),
+            transform=transform,
+            collator=mask_collator,
+            num_workers=cfgs_data.get("num_workers", 4),
+            world_size=1,
+            rank=0,
+        )
+        client_loaders.append(loader)
+
+    # federated
+    global_lora_state = collect_global_lora_state(encoder)
+    client_local_states = {i: None for i in range(num_clients)}
+
+    local_cfgs = {
+        "local_steps": federated_cfgs.get("local_steps", 50),
+        "lr": federated_cfgs.get("lr", 1e-4),
+        "weight_decay": federated_cfgs.get("weight_decay", 0.04),
+        "loss_exp": federated_cfgs.get("loss_exp", 1.0),
+        "ema": federated_cfgs.get("ema", [0.996, 1.0]),
+        "dtype": args.get("meta", {}).get("dtype", "bfloat16"),
+    }
+
+    for round_idx in range(num_rounds):
+        logger.info(f"=== Round {round_idx + 1}/{num_rounds} ===")
+        client_states = []
+
+        for client_id in range(num_clients):
+            # fresh deep copies per client per round
+            client_encoder = copy.deepcopy(encoder)
+            client_predictor = copy.deepcopy(predictor)
+            client_teacher = copy.deepcopy(encoder) #teacher=copy of student
+
+            # load current global LoRA into all three
+            load_global_lora_state(client_encoder, global_lora_state)
+            load_global_lora_state(client_predictor, global_lora_state)
+            load_global_lora_state(client_teacher, global_lora_state)
+
+            if client_local_states[client_id] is not None:
+                load_local_lora_state(client_encoder,  client_local_states[client_id])
+                load_local_lora_state(client_teacher,  client_local_states[client_id])
+
+            updated_global, updated_local = local_train(
+                client_id=client_id,
+                encoder=client_encoder,
+                predictor=client_predictor,
+                target_encoder=client_teacher,
+                data_loader=client_loaders[client_id],
+                cfgs=local_cfgs,
+                device=device,
+            )
+            client_states.append(updated_global)
+            client_local_states[client_id] = updated_local
+
+        # aggregate & update global LoRA state
+        # fedavg for now
+        global_lora_state = fedavg(client_states)
+        load_global_lora_state(encoder, global_lora_state)
+        logger.info(f"Round {round_idx + 1} aggregation complete.")
+
+        if (round_idx + 1) % federated_cfgs.get("save_every", 10) == 0:
+            torch.save(
+                {
+                    "encoder": encoder.state_dict(),
+                    "predictor": predictor.state_dict(),
+                    "global_lora": global_lora_state,
+                    "client_local_loras": client_local_states,
+                    "round": round_idx + 1,
+                },
+                f"fed_ckpt_round{round_idx+1}.pt",
+            )
