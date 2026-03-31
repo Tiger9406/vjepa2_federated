@@ -164,8 +164,12 @@ def local_train(
     return collect_global_lora_state(encoder), collect_local_lora_state(encoder)
 
 def fedavg(client_states):
-    # TODO
-    return client_states
+    aggregated = {}
+    for layer_name in client_states[0]:
+        agg_A = torch.stack([cs[layer_name]["A"] for cs in client_states]).mean(0)
+        agg_B = torch.stack([cs[layer_name]["B"] for cs in client_states]).mean(0)
+        aggregated[layer_name] = {"A": agg_A, "B": agg_B}
+    return aggregated
 
 
 def main(args, resume_preempt=False):
