@@ -109,3 +109,19 @@ def load_global_lora_state(model, state):
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear) and name in state:
             module.load_global_state(state[name])
+
+def collect_local_lora_state(model):
+    state = {}
+    for name, module in model.named_modules():
+        if isinstance(module, LoRALinear):
+            state[name] = {
+                "A": module.local_A.data.clone(),
+                "B": module.local_B.data.clone(),
+            }
+    return state
+
+def load_local_lora_state(model, state):
+    for name, module in model.named_modules():
+        if isinstance(module, LoRALinear) and name in state:
+            module.local_A.data.copy_(state[name]["A"])
+            module.local_B.data.copy_(state[name]["B"])
