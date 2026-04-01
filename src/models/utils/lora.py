@@ -24,15 +24,19 @@ class LoRALinear(nn.Module):
         d_in, d_out = linear.in_features, linear.out_features
         scale = alpha / r
 
+        factory_kwargs = {"device": linear.weight.device, "dtype": linear.weight.dtype}
+
         # global adapter
-        self.global_A = nn.Parameter(torch.empty(r, d_in))  # compresses input data
+        self.global_A = nn.Parameter(
+            torch.empty((r, d_in), **factory_kwargs)
+        )  # compresses input data
         self.global_B = nn.Parameter(
-            torch.zeros(d_out, r)
+            torch.zeros((d_out, r), **factory_kwargs)
         )  # expands out into output size
 
         # local adapter
-        self.local_A = nn.Parameter(torch.empty(r, d_in))
-        self.local_B = nn.Parameter(torch.zeros(d_out, r))
+        self.local_A = nn.Parameter(torch.empty((r, d_in), **factory_kwargs))
+        self.local_B = nn.Parameter(torch.zeros((d_out, r), **factory_kwargs))
 
         # function for calculating best random starting values
         nn.init.kaiming_uniform_(self.global_A, a=math.sqrt(5))
@@ -64,7 +68,8 @@ class LoRALinear(nn.Module):
         self.global_A.data.copy_(state["A"])
         self.global_B.data.copy_(state["B"])
 
-def inject_lora(model, r=8, alpha = 16.0, target_modules=("qkv", "proj", "fc1", "fc2")):
+
+def inject_lora(model, r=8, alpha=16.0, target_modules=("qkv", "proj", "fc1", "fc2")):
     """
     Replaces all nn.Linear with LoRALinear
     """
@@ -83,16 +88,23 @@ def inject_lora(model, r=8, alpha = 16.0, target_modules=("qkv", "proj", "fc1", 
                 break
     return model
 
+
 def freeze_non_lora(model):
     """
     Freeze all parameters in backbone that's not lora adapter
     """
 
     for name, param in model.named_parameters():
-        if "global_A" in name or "global_B" in name or "local_A" in name or "local_B" in name:
+        if (
+            "global_A" in name
+            or "global_B" in name
+            or "local_A" in name
+            or "local_B" in name
+        ):
             param.requires_grad = True
         else:
             param.requires_grad = False
+
 
 def collect_global_lora_state(model):
     """
@@ -104,11 +116,13 @@ def collect_global_lora_state(model):
             state[name] = module.global_state()
     return state
 
+
 def load_global_lora_state(model, state):
     """Once processed, load the aggregated global lora back into the model"""
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear) and name in state:
             module.load_global_state(state[name])
+
 
 def collect_local_lora_state(model):
     state = {}
@@ -119,6 +133,7 @@ def collect_local_lora_state(model):
                 "B": module.local_B.data.clone(),
             }
     return state
+
 
 def load_local_lora_state(model, state):
     for name, module in model.named_modules():
@@ -134,10 +149,11 @@ def collect_full_lora_state(model):
             state[name] = {
                 "global_A": module.global_A.data.clone(),
                 "global_B": module.global_B.data.clone(),
-                "local_A":  module.local_A.data.clone(),
-                "local_B":  module.local_B.data.clone(),
+                "local_A": module.local_A.data.clone(),
+                "local_B": module.local_B.data.clone(),
             }
     return state
+
 
 def load_full_lora_state(model, state):
     for name, module in model.named_modules():
