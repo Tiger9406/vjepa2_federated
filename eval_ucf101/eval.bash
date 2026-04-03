@@ -1,3 +1,3 @@
 #!/bin/bash
 
-python -m evals.main_distributed --fname eval_ucf101/eval.yaml --checkpoint /workspace/vjepa_run/latest.pt
+python -m evals.main --fname eval_ucf101/eval_ucf101.yaml --checkpoint /workspace/vjepa_run/latest.pt 
