@@ -1,0 +1,78 @@
+
+app: vjepa
+nodes: 1
+tasks_per_node: 1
+cpus_per_task: 12
+mem_per_gpu: 32G       
+folder: /workspace/vjepa_run
+data:
+  dataset_type: VideoDataset
+  datasets:
+  - /workspace/vjepa2_federated/videos.csv  # Points to the CSV we just made
+  datasets_weights:
+  - 1.0
+  batch_size: 64   
+  crop_size: 224  
+  patch_size: 16
+  dataset_fpcs:
+  - 16              
+  tubelet_size: 2
+  fps: 4
+  num_workers: 8 
+  persistent_workers: true
+  pin_mem: true
+data_aug:
+  auto_augment: false
+  motion_shift: false
+  random_resize_aspect_ratio:
+  - 0.75
+  - 1.35
+  random_resize_scale:
+  - 0.3
+  - 1.0
+  reprob: 0.0
+loss:
+  loss_exp: 1.0
+mask:
+  - aspect_ratio: [0.75, 1.5]
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 8
+    spatial_scale: [0.15, 0.15]
+    temporal_scale: [1.0, 1.0]
+  - aspect_ratio: [0.75, 1.5]
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 2
+    spatial_scale: [0.7, 0.7]
+    temporal_scale: [1.0, 1.0]
+meta:
+  dtype: bfloat16   
+  eval_freq: 1000
+  load_checkpoint: true
+  save_every_freq: 20
+  seed: 239
+  use_sdpa: true        # PyTorch Scaled Dot Product Attention (faster)
+model:
+  model_name: vit_small  # Switched Large -> small to save params
+  pred_depth: 6
+  pred_embed_dim: 192
+  pred_num_heads: 12
+  uniform_power: true
+  use_activation_checkpointing: false
+  use_mask_tokens: true
+  use_rope: true
+  zero_init_mask_tokens: true
+optimization:
+  ema: [0.996, 1.0]     # Adjusted EMA for smaller batch size
+  epochs: 400
+  final_lr: 1.0e-06
+  final_weight_decay: 0.04
+  ipe: 500              # Iterations per epoch
+  ipe_scale: 1.0
+  lr: 5.0e-05           # scaled down LR
+  start_lr: 1.0e-05
+  warmup: 20
+  weight_decay: 0.04
