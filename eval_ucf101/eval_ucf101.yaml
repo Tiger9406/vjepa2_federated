@@ -1,4 +1,10 @@
 eval_name: "video_classification_frozen"
+folder: "./eval_ucf101/logs"
+
+# hardware setup; this is L4
+nodes: 1
+tasks_per_node: 1
+cpus_per_task: 4
 
 model_kwargs:
   module_name: "evals.video_classification_frozen.modelcustom.vit_encoder_multiclip"
@@ -18,10 +24,11 @@ experiment:
     frame_step: 4
     num_segments: 1
     num_views_per_segment: 1
+    num_workers: 4
   
   classifier:
     num_probe_blocks: 1
-    num_heads: 12
+    num_heads: 6
   
   optimization:
     batch_size: 64
