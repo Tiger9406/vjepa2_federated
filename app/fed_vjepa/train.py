@@ -46,6 +46,7 @@ def local_train(
     m_schedule,
     scaler,
     optimizer,
+    mixed,
     device,
 ):
     # assume we have a configs for now lol
@@ -53,7 +54,6 @@ def local_train(
     local_steps = cfgs["local_steps"]
     loss_exp = cfgs["loss_exp"]
     data_type = torch.bfloat16 if cfgs["dtype"] == "bfloat16" else torch.float32
-    mixed = data_type != torch.float32
 
     # teacher never accumulates teh gradients
     for p in target_encoder.parameters():
@@ -119,16 +119,19 @@ def local_train(
             z = forward_context(all_clips)
             loss = loss_fn(z, h)
 
-        # backwards and optimizer
-        optimizer.zero_grad()
         if mixed:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
+        else:
+            loss.backward()
+        if mixed:
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss.backward()
             optimizer.step()
+
+        # backwards and optimizer
+        optimizer.zero_grad()
 
         # then do teacher ema update
 
@@ -152,12 +155,16 @@ def local_train(
             )
 
 
-def fedavg(client_states):
-    # BUG: giving everyone equal votes; to consider input size
+def fedavg(client_states, client_sample_counts):
+    total_samples = sum(client_sample_counts)
     aggregated = {}
     for layer_name in client_states[0]:
-        agg_A = torch.stack([cs[layer_name]["A"] for cs in client_states]).mean(0)
-        agg_B = torch.stack([cs[layer_name]["B"] for cs in client_states]).mean(0)
+        agg_A = 0
+        agg_B = 0
+        for cs, count in zip(client_states, client_sample_counts):
+            weight = count / total_samples
+            agg_A += cs[layer_name]["A"] * weight
+            agg_B += cs[layer_name]["B"] * weight
         aggregated[layer_name] = {"A": agg_A, "B": agg_B}
     return aggregated
 
@@ -247,6 +254,7 @@ def main(args, resume_preempt=False):
 
     # per client data loader
     client_loaders = []
+    client_sample_counts = []
     for i in range(num_clients):
         loader, _ = init_data(
             data=cfgs_data.get("dataset_type", "videodataset"),
@@ -263,6 +271,14 @@ def main(args, resume_preempt=False):
         )
         client_loaders.append(loader)
 
+        try:
+            num_samples = len(loader.dataset)
+        except (AttributeError, TypeError):
+            # in case of IterableDatasets or WebDatasets?
+            num_samples = len(loader) * cfgs_data["batch_size"]
+
+        client_sample_counts.append(num_samples)
+
     # federated
     encoder_global_lora_state = collect_global_lora_state(encoder)
     predictor_global_lora_state = collect_global_lora_state(predictor)
@@ -270,8 +286,19 @@ def main(args, resume_preempt=False):
     client_teacher_full_lora_states = {i: None for i in range(num_clients)}
     client_local_predictor_states = {i: None for i in range(num_clients)}
 
-    mixed = args.get("meta", {}).get("dtype", "bfloat16") != torch.float32
-    client_scalers = {i: torch.cuda.amp.GradScaler() if mixed else None for i in range(num_clients)}
+    which_dtype = args.get("meta", {}).get("dtype", "bfloat16")
+    if which_dtype.lower() == "bfloat16":
+        # data_type = torch.bfloat16
+        mixed = True
+    elif which_dtype.lower() == "float16":
+        # data_type = torch.float16
+        mixed = True
+    else:
+        # data_type = torch.float32
+        mixed = False
+    client_scalers = {
+        i: torch.cuda.amp.GradScaler() if mixed else None for i in range(num_clients)
+    }
 
     local_steps = federated_cfgs.get("local_steps", 50)
     local_cfgs = {
@@ -295,12 +322,7 @@ def main(args, resume_preempt=False):
     client_teacher = copy.deepcopy(encoder)  # to be ema'd
     client_predictor = copy.deepcopy(predictor)
 
-    client_optimizers = {i: None for i in range(num_clients)}
-    for i in range(num_clients):
-        lora_params = [p for p in client_encoder.parameters() if p.requires_grad] + \
-                    [p for p in client_predictor.parameters() if p.requires_grad]
-        client_optimizers[i] = torch.optim.AdamW(lora_params, lr=local_cfgs["lr"], weight_decay=local_cfgs["weight_decay"])
-
+    client_optimizer_states = {i: None for i in range(num_clients)}
 
     for round_idx in range(num_rounds):
         logger.info(f"=== Round {round_idx + 1}/{num_rounds} ===")
@@ -338,6 +360,17 @@ def main(args, resume_preempt=False):
                     client_predictor, client_local_predictor_states[client_id]
                 )
 
+            lora_params = [
+                p for p in client_encoder.parameters() if p.requires_grad
+            ] + [p for p in client_predictor.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(
+                lora_params,
+                lr=local_cfgs["lr"],
+                weight_decay=local_cfgs["weight_decay"],
+            )
+            if client_optimizer_states[client_id] is not None:
+                optimizer.load_state_dict(client_optimizer_states[client_id])
+
             local_train(
                 client_id=client_id,
                 encoder=client_encoder,
@@ -347,9 +380,12 @@ def main(args, resume_preempt=False):
                 cfgs=local_cfgs,
                 m_schedule=round_m_values,
                 scaler=client_scalers[client_id],
-                optimizer=client_optimizers[client_id],
+                optimizer=optimizer,
+                mixed=mixed,
                 device=device,
             )
+
+            client_optimizer_states[client_id] = optimizer.state_dict()
 
             per_client_global_encoder_lora.append(
                 collect_global_lora_state(client_encoder)
@@ -370,8 +406,12 @@ def main(args, resume_preempt=False):
 
         # aggregate & update global LoRA state
         # fedavg for now
-        encoder_global_lora_state = fedavg(per_client_global_encoder_lora)
-        predictor_global_lora_state = fedavg(per_client_global_predictor_lora)
+        encoder_global_lora_state = fedavg(
+            per_client_global_encoder_lora, client_sample_counts
+        )
+        predictor_global_lora_state = fedavg(
+            per_client_global_predictor_lora, client_sample_counts
+        )
 
         load_global_lora_state(encoder, encoder_global_lora_state)
         load_global_lora_state(predictor, predictor_global_lora_state)
