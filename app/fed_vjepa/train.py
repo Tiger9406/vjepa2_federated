@@ -44,24 +44,16 @@ def local_train(
     data_loader,
     cfgs,
     m_schedule,
+    scaler,
+    optimizer,
     device,
 ):
     # assume we have a configs for now lol
     # define all the configs
-    lr = cfgs["lr"]
     local_steps = cfgs["local_steps"]
     loss_exp = cfgs["loss_exp"]
-    weight_decay = cfgs["weight_decay"]
     data_type = torch.bfloat16 if cfgs["dtype"] == "bfloat16" else torch.float32
     mixed = data_type != torch.float32
-
-    # so we need the weights, the optimizer for updating, and the scaler
-    # gets parameters of lora to be updated
-    lora_params = [p for p in encoder.parameters() if p.requires_grad] + [
-        p for p in predictor.parameters() if p.requires_grad
-    ]
-    optimizer = torch.optim.AdamW(lora_params, lr=lr, weight_decay=weight_decay)
-    scaler = torch.cuda.amp.GradScaler() if mixed else None
 
     # teacher never accumulates teh gradients
     for p in target_encoder.parameters():
@@ -278,6 +270,9 @@ def main(args, resume_preempt=False):
     client_teacher_full_lora_states = {i: None for i in range(num_clients)}
     client_local_predictor_states = {i: None for i in range(num_clients)}
 
+    mixed = args.get("meta", {}).get("dtype", "bfloat16") != torch.float32
+    client_scalers = {i: torch.cuda.amp.GradScaler() if mixed else None for i in range(num_clients)}
+
     local_steps = federated_cfgs.get("local_steps", 50)
     local_cfgs = {
         "lr": federated_cfgs.get("lr", 1e-4),
@@ -299,6 +294,13 @@ def main(args, resume_preempt=False):
     client_encoder = copy.deepcopy(encoder)
     client_teacher = copy.deepcopy(encoder)  # to be ema'd
     client_predictor = copy.deepcopy(predictor)
+
+    client_optimizers = {i: None for i in range(num_clients)}
+    for i in range(num_clients):
+        lora_params = [p for p in client_encoder.parameters() if p.requires_grad] + \
+                    [p for p in client_predictor.parameters() if p.requires_grad]
+        client_optimizers[i] = torch.optim.AdamW(lora_params, lr=local_cfgs["lr"], weight_decay=local_cfgs["weight_decay"])
+
 
     for round_idx in range(num_rounds):
         logger.info(f"=== Round {round_idx + 1}/{num_rounds} ===")
@@ -344,6 +346,8 @@ def main(args, resume_preempt=False):
                 data_loader=client_loaders[client_id],
                 cfgs=local_cfgs,
                 m_schedule=round_m_values,
+                scaler=client_scalers[client_id],
+                optimizer=client_optimizers[client_id],
                 device=device,
             )
 
