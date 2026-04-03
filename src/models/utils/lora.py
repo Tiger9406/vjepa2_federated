@@ -62,7 +62,16 @@ class LoRALinear(nn.Module):
         """
         Returns dictionary of "A": global LoRA A and "B": global LoRA B
         """
-        return {"A": self.global_A.detach().clone(), "B": self.global_B.detach().clone()}
+        return {
+            "A": self.global_A.detach().clone().cpu(),
+            "B": self.global_B.detach().clone().cpu(),
+        }
+
+    def local_state(self):
+        return {
+            "A": self.local_A.detach().clone().cpu(),
+            "B": self.local_B.detach().clone().cpu(),
+        }
 
     def load_global_state(self, state):
         self.global_A.data.copy_(state["A"])
@@ -128,10 +137,7 @@ def collect_local_lora_state(model):
     state = {}
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear):
-            state[name] = {
-                "A": module.local_A.detach().clone(),
-                "B": module.local_B.detach().clone(),
-            }
+            state[name] = module.local_state()
     return state
 
 
@@ -146,11 +152,14 @@ def collect_full_lora_state(model):
     state = {}
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear):
+            g_state = module.global_state()
+            l_state = module.local_state()
+
             state[name] = {
-                "global_A": module.global_A.detach().clone(),
-                "global_B": module.global_B.detach().clone(),
-                "local_A": module.local_A.detach().clone(),
-                "local_B": module.local_B.detach().clone(),
+                "global_A": g_state["A"],
+                "global_B": g_state["B"],
+                "local_A": l_state["A"],
+                "local_B": l_state["B"],
             }
     return state
 
