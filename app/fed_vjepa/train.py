@@ -12,23 +12,24 @@ Then next round
 """
 
 import copy
+
 import torch
 import torch.nn.functional as F
 
-from app.vjepa.utils import init_video_model
 from app.vjepa.transforms import make_transforms
-from src.masks.utils import apply_masks
-from src.masks.multiseq_multiblock3d import MaskCollator
+from app.vjepa.utils import init_video_model
 from src.datasets.data_manager import init_data
+from src.masks.multiseq_multiblock3d import MaskCollator
+from src.masks.utils import apply_masks
 from src.models.utils.lora import (
-    collect_global_lora_state,
-    inject_lora,
-    freeze_non_lora,
-    load_global_lora_state,
-    collect_local_lora_state,
-    load_local_lora_state,
     collect_full_lora_state,
-    load_full_lora_state
+    collect_global_lora_state,
+    collect_local_lora_state,
+    freeze_non_lora,
+    inject_lora,
+    load_full_lora_state,
+    load_global_lora_state,
+    load_local_lora_state,
 )
 from src.utils.logging import AverageMeter, get_logger
 
@@ -42,15 +43,14 @@ def local_train(
     target_encoder,  # teacher
     data_loader,
     cfgs,
+    m_schedule,
     device,
 ):
     # assume we have a configs for now lol
     # define all the configs
-    local_steps = cfgs["local_steps"]
     lr = cfgs["lr"]
+    local_steps = cfgs["local_steps"]
     loss_exp = cfgs["loss_exp"]
-    ema_start = cfgs["ema"][0]
-    ema_end = cfgs["ema"][1]
     weight_decay = cfgs["weight_decay"]
     data_type = torch.bfloat16 if cfgs["dtype"] == "bfloat16" else torch.float32
     mixed = data_type != torch.float32
@@ -62,11 +62,6 @@ def local_train(
     ]
     optimizer = torch.optim.AdamW(lora_params, lr=lr, weight_decay=weight_decay)
     scaler = torch.cuda.amp.GradScaler() if mixed else None
-
-    momentum_scheduler = (
-        ema_start + i * (ema_end - ema_start) / local_steps
-        for i in range(local_steps + 1)
-    )
 
     # teacher never accumulates teh gradients
     for p in target_encoder.parameters():
@@ -145,15 +140,15 @@ def local_train(
 
         # then do teacher ema update
 
-        m = next(momentum_scheduler)
+        m = m_schedule[step]
         with torch.no_grad():
             params_k, params_q = [], []
             for param_q, param_k in zip(
                 encoder.parameters(), target_encoder.parameters()
             ):
-                # requires_grad is true only on LoRA params
-                params_k.append(param_k)
-                params_q.append(param_q)
+                if param_q.requires_grad:  # Only apply EMA to trainable LoRA params
+                    params_k.append(param_k)
+                    params_q.append(param_q)
             torch._foreach_mul_(params_k, m)
             torch._foreach_add_(params_k, params_q, alpha=1.0 - m)
 
@@ -164,7 +159,9 @@ def local_train(
                 f"[Client {client_id}] step {step}/{local_steps}  loss={loss_meter.avg:.4f}"
             )
 
+
 def fedavg(client_states):
+    # BUG: giving everyone equal votes; to consider input size
     aggregated = {}
     for layer_name in client_states[0]:
         agg_A = torch.stack([cs[layer_name]["A"] for cs in client_states]).mean(0)
@@ -211,8 +208,11 @@ def main(args, resume_preempt=False):
     # load checkpoint of federated training
     pretrain_ckpt = federated_cfgs["pretrain_checkpoint"]
     ckpt = torch.load(pretrain_ckpt, map_location="cpu")
+
     def _clean(sd):
-        return {k.replace("module.", "").replace("backbone.", ""): v for k, v in sd.items()}
+        return {
+            k.replace("module.", "").replace("backbone.", ""): v for k, v in sd.items()
+        }
 
     encoder.load_state_dict(_clean(ckpt["encoder"]), strict=False)
     predictor.load_state_dict(_clean(ckpt["predictor"]), strict=False)
@@ -223,13 +223,21 @@ def main(args, resume_preempt=False):
     freeze_non_lora(encoder)
     freeze_non_lora(predictor)
 
+    # initial loras
+    base_encoder_lora = collect_full_lora_state(encoder)
+    base_predictor_lora = collect_full_lora_state(predictor)
+
     trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
     total = sum(p.numel() for p in encoder.parameters())
-    logger.info(f"Trainable: {trainable:, } / {total:, } ({100*trainable/total:.2f}%)")
+    logger.info(
+        f"Trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)"
+    )
 
     transform = make_transforms(
         random_horizontal_flip=True,
-        random_resize_aspect_ratio=cfgs_data.get("random_resize_aspect_ratio", [3/4, 4/3]),
+        random_resize_aspect_ratio=cfgs_data.get(
+            "random_resize_aspect_ratio", [3 / 4, 4 / 3]
+        ),
         random_resize_scale=cfgs_data.get("random_resize_scale", [0.3, 1.0]),
         reprob=cfgs_data.get("reprob", 0.0),
         auto_augment=cfgs_data.get("auto_augment", False),
@@ -270,17 +278,26 @@ def main(args, resume_preempt=False):
     client_teacher_full_lora_states = {i: None for i in range(num_clients)}
     client_local_predictor_states = {i: None for i in range(num_clients)}
 
+    local_steps = federated_cfgs.get("local_steps", 50)
     local_cfgs = {
-        "local_steps": federated_cfgs.get("local_steps", 50),
         "lr": federated_cfgs.get("lr", 1e-4),
         "weight_decay": federated_cfgs.get("weight_decay", 0.04),
         "loss_exp": federated_cfgs.get("loss_exp", 1.0),
-        "ema": federated_cfgs.get("ema", [0.996, 1.0]),
+        "local_steps": local_steps,
         "dtype": args.get("meta", {}).get("dtype", "bfloat16"),
     }
 
+    total_local_steps = num_rounds * local_steps
+    ema_start = federated_cfgs.get("ema", [0.996, 1.0])[0]
+    ema_end = federated_cfgs.get("ema", [0.996, 1.0])[1]
+
+    global_momentum_scheduler = (
+        ema_start + i * (ema_end - ema_start) / total_local_steps
+        for i in range(total_local_steps)
+    )
+
     client_encoder = copy.deepcopy(encoder)
-    client_teacher = copy.deepcopy(encoder) # to be ema'd
+    client_teacher = copy.deepcopy(encoder)  # to be ema'd
     client_predictor = copy.deepcopy(predictor)
 
     for round_idx in range(num_rounds):
@@ -289,21 +306,35 @@ def main(args, resume_preempt=False):
         per_client_global_encoder_lora = []
         per_client_global_predictor_lora = []
 
+        round_m_values = [next(global_momentum_scheduler) for _ in range(local_steps)]
+
         for client_id in range(num_clients):
+            # reset prev data; mostly for first round
+            load_full_lora_state(client_encoder, base_encoder_lora)
+            load_full_lora_state(client_predictor, base_predictor_lora)
+            load_full_lora_state(client_teacher, base_encoder_lora)
+
             # load current global LoRA into all three
             load_global_lora_state(client_encoder, encoder_global_lora_state)
             load_global_lora_state(client_predictor, predictor_global_lora_state)
+            load_global_lora_state(client_teacher, encoder_global_lora_state)
 
             # load local states; all have their own locals
             if client_local_encoder_states[client_id] is not None:
-                load_local_lora_state(client_encoder, client_local_encoder_states[client_id])
+                load_local_lora_state(
+                    client_encoder, client_local_encoder_states[client_id]
+                )
             if client_teacher_full_lora_states[client_id] is not None:
                 # really global only in name
                 # Teacher purely local rn; restore its full LoRA state both adapters
                 # NOTE: To be made different
-                load_full_lora_state(client_teacher, client_teacher_full_lora_states[client_id])
+                load_full_lora_state(
+                    client_teacher, client_teacher_full_lora_states[client_id]
+                )
             if client_local_predictor_states[client_id] is not None:
-                load_local_lora_state(client_predictor, client_local_predictor_states[client_id])
+                load_local_lora_state(
+                    client_predictor, client_local_predictor_states[client_id]
+                )
 
             local_train(
                 client_id=client_id,
@@ -312,15 +343,26 @@ def main(args, resume_preempt=False):
                 target_encoder=client_teacher,
                 data_loader=client_loaders[client_id],
                 cfgs=local_cfgs,
+                m_schedule=round_m_values,
                 device=device,
             )
 
-            per_client_global_encoder_lora.append(collect_global_lora_state(client_encoder))
-            per_client_global_predictor_lora.append(collect_global_lora_state(client_predictor))
+            per_client_global_encoder_lora.append(
+                collect_global_lora_state(client_encoder)
+            )
+            per_client_global_predictor_lora.append(
+                collect_global_lora_state(client_predictor)
+            )
 
-            client_local_encoder_states[client_id] = collect_local_lora_state(client_encoder)
-            client_teacher_full_lora_states[client_id] = collect_full_lora_state(client_teacher)
-            client_local_predictor_states[client_id] = collect_local_lora_state(client_predictor)
+            client_local_encoder_states[client_id] = collect_local_lora_state(
+                client_encoder
+            )
+            client_teacher_full_lora_states[client_id] = collect_full_lora_state(
+                client_teacher
+            )
+            client_local_predictor_states[client_id] = collect_local_lora_state(
+                client_predictor
+            )
 
         # aggregate & update global LoRA state
         # fedavg for now
@@ -343,5 +385,5 @@ def main(args, resume_preempt=False):
                     "client_predictor_local_loras": client_local_predictor_states,
                     "round": round_idx + 1,
                 },
-                f"fed_ckpt_round{round_idx+1}.pt",
+                f"fed_ckpt_round{round_idx + 1}.pt",
             )
