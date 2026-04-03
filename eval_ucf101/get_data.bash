@@ -1,3 +1,5 @@
+#!/bin/bash
+
 wget --no-check-certificate -P eval_ucf101/ https://www.crcv.ucf.edu/data/UCF101/UCF101.rar
 wget --no-check-certificate -P eval_ucf101/ https://www.crcv.ucf.edu/data/UCF101/UCF101TrainTestSplits-RecognitionTask.zip
 
