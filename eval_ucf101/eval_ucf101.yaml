@@ -1,6 +1,6 @@
 eval_name: "video_classification_frozen"
-folder: "./eval_ucf101/logs"
-
+folder: "/content/drive/MyDrive/vjepa2_ucf101_checkpoints"
+resume_checkpoint: true
 # hardware setup; this is L4
 nodes: 1
 tasks_per_node: 1
