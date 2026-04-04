@@ -41,11 +41,11 @@ pretrain_checkpoint:
 data:
   dataset_type: VideoDataset
   client_datasets: # one path per client
-    - /data/client_0/videos.csv
-    - /data/client_1/videos.csv
+    - /dev/shm/vjepa2_federated/client_0/videos.csv
+    - /dev/shm/vjepa2_federated/client_1/videos.csv
   client_datasets_path:
-    - /data/client_0/
-    - /data/client_1/
+    - /dev/shm/vjepa2_federated/fed_training/bdd/
+    - /dev/shm/vjepa2_federated/fed_training/epic/
   batch_size: 64
   crop_size: 224
   patch_size: 16

@@ -29,7 +29,7 @@ def generate_video_csv(source_dir, output_csv):
     print(f"Generated {output_csv} with {len(video_paths)} videos.")
 
 if __name__ == "__main__":
-    yaml_path = "fed_vits.yaml"
+    yaml_path = "./app/fed_vjepa/fed_vits.yaml"
     
     print(f"Loading config from {yaml_path}...")
     with open(yaml_path, "r") as f:
