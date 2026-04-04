@@ -43,8 +43,8 @@ pretrain_checkpoint:
 data:
   dataset_type: VideoDataset
   client_datasets: # one path per client
-    - /content/vjepa2_federated/client_0/videos.csv
-    - /content/vjepa2_federated/client_1/videos.csv
+    - /content/vjepa2_federated/fed_training/client_0/videos.csv
+    - /content/vjepa2_federated/fed_training/client_1/videos.csv
   client_datasets_path:
     - /content/vjepa2_federated/fed_training/bdd/
     - /content/vjepa2_federated/fed_training/epic/
