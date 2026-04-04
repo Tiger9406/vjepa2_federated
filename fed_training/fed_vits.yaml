@@ -1,4 +1,6 @@
 # carry over from pretraining yaml
+app: fed_vjepa
+
 meta:
   dtype: bfloat16
   use_sdpa: true
