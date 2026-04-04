@@ -38,7 +38,7 @@ lora_r: 8
 lora_alpha: 16.0
 
 pretrain_checkpoint:
-  pretrain_checkpoint: /workspace/pretrain/latest.pt
+  pretrain_checkpoint: /dev/shm/vjepa2_federated/latest.pt
 
 data:
   dataset_type: VideoDataset
@@ -58,8 +58,8 @@ data:
   num_workers: 8
 
 federated:
-  save_dir: /workspace/fed_run
-  resume_checkpoint: /workspace/fed_run/fed_latest.pt
+  save_dir: /content/drive/MyDrive/fed_run
+  resume_checkpoint: /content/drive/MyDrive/fed_run/fed_latest.pt
   save_every: 10
   local_steps: 50
   lr: 1.0e-4
