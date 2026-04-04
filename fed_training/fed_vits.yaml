@@ -1,5 +1,6 @@
 # carry over from pretraining yaml
 app: fed_vjepa
+folder: /content/drive/MyDrive/fed_run/logs
 
 meta:
   dtype: bfloat16
@@ -38,7 +39,7 @@ lora_r: 8
 lora_alpha: 16.0
 
 pretrain_checkpoint:
-  pretrain_checkpoint: /dev/shm/vjepa2_federated/latest.pt
+  pretrain_checkpoint: /content/vjepa2_federated/latest.pt
 
 data:
   dataset_type: VideoDataset
