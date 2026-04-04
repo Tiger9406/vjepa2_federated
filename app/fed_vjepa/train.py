@@ -82,7 +82,12 @@ def _reset_global_b_optimizer_state(optimizer, client_encoder, client_predictor)
                     state["exp_avg_sq"].zero_()
                 # reset step count too so Adam LR scaling is fresh
                 if "step" in state:
-                    state["step"] = torch.zeros_like(state["step"]) if isinstance(state["step"], torch.Tensor) else 0
+                    state["step"] = (
+                        torch.zeros_like(state["step"])
+                        if isinstance(state["step"], torch.Tensor)
+                        else 0
+                    )
+
 
 def local_train(
     client_id: int,
@@ -444,7 +449,9 @@ def main(args, resume_preempt=False):
             if client_optimizer_states[client_id] is not None:
                 optimizer.load_state_dict(client_optimizer_states[client_id])
                 # reset global_B moments since FedAvg overwrote those params
-                _reset_global_b_optimizer_state(optimizer, client_encoder, client_predictor)
+                _reset_global_b_optimizer_state(
+                    optimizer, client_encoder, client_predictor
+                )
 
             local_train(
                 client_id=client_id,
@@ -479,9 +486,18 @@ def main(args, resume_preempt=False):
         load_global_lora_state(teacher, global_lora_states["teacher"])
         logger.info(f"Round {round_idx + 1} aggregation complete.")
 
-        save_path = os.path.join(save_dir, f"fed_ckpt_round{round_idx + 1}.pt")
-
+        latest_save_path = os.path.join(save_dir, "fed_latest.pt")
+        torch.save(
+            {
+                "global_lora_states": global_lora_states,
+                "client_local_lora_states": local_lora_states,
+                "client_optimizer_states": client_optimizer_states,
+                "round": round_idx + 1,
+            },
+            latest_save_path,
+        )
         if (round_idx + 1) % federated_cfgs.get("save_every", 10) == 0:
+            save_path = os.path.join(save_dir, f"fed_ckpt_round{round_idx + 1}.pt")
             torch.save(
                 {
                     "global_lora_states": global_lora_states,
@@ -490,4 +506,4 @@ def main(args, resume_preempt=False):
                     "round": round_idx + 1,
                 },
                 save_path,
-            ) # needs to separately load latest.pt
+            )  # needs to separately load latest.pt
