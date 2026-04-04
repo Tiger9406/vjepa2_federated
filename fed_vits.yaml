@@ -43,6 +43,9 @@ data:
   client_datasets: # one path per client
     - /data/client_0/videos.csv
     - /data/client_1/videos.csv
+  client_datasets_path:
+    - /data/client_0/
+    - /data/client_1/
   batch_size: 64
   crop_size: 224
   patch_size: 16
