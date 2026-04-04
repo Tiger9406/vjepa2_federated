@@ -28,11 +28,11 @@ class LoRALinear(nn.Module):
 
         # global adapter
         self.global_A = nn.Parameter(
-            torch.empty((r, d_in), **factory_kwargs)
+            torch.empty((r, d_in), **factory_kwargs),
+            requires_grad=False,  # frozen
         )  # compresses input data
-        self.global_B = nn.Parameter(
-            torch.zeros((d_out, r), **factory_kwargs)
-        )  # expands out into output size
+        # expands out into output size
+        self.global_B = nn.Parameter(torch.zeros((d_out, r), **factory_kwargs))
 
         # local adapter
         self.local_A = nn.Parameter(torch.empty((r, d_in), **factory_kwargs))
@@ -63,7 +63,7 @@ class LoRALinear(nn.Module):
         Returns dictionary of "A": global LoRA A and "B": global LoRA B
         """
         return {
-            "A": self.global_A.detach().clone().cpu(),
+            # "A": self.global_A.detach().clone().cpu(),
             "B": self.global_B.detach().clone().cpu(),
         }
 
@@ -74,7 +74,7 @@ class LoRALinear(nn.Module):
         }
 
     def load_global_state(self, state):
-        self.global_A.data.copy_(state["A"])
+        # self.global_A.data.copy_(state["A"])
         self.global_B.data.copy_(state["B"])
 
 
@@ -104,12 +104,7 @@ def freeze_non_lora(model):
     """
 
     for name, param in model.named_parameters():
-        if (
-            "global_A" in name
-            or "global_B" in name
-            or "local_A" in name
-            or "local_B" in name
-        ):
+        if "global_B" in name or "local_A" in name or "local_B" in name:
             param.requires_grad = True
         else:
             param.requires_grad = False
@@ -156,7 +151,7 @@ def collect_full_lora_state(model):
             l_state = module.local_state()
 
             state[name] = {
-                "global_A": g_state["A"],
+                # "global_A": g_state["A"],
                 "global_B": g_state["B"],
                 "local_A": l_state["A"],
                 "local_B": l_state["B"],
@@ -167,7 +162,7 @@ def collect_full_lora_state(model):
 def load_full_lora_state(model, state):
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear) and name in state:
-            module.global_A.data.copy_(state[name]["global_A"])
+            # module.global_A.data.copy_(state[name]["global_A"])
             module.global_B.data.copy_(state[name]["global_B"])
             module.local_A.data.copy_(state[name]["local_A"])
             module.local_B.data.copy_(state[name]["local_B"])

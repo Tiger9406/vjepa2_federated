@@ -159,13 +159,15 @@ def fedavg(client_states, client_sample_counts):
     total_samples = sum(client_sample_counts)
     aggregated = {}
     for layer_name in client_states[0]:
-        agg_A = 0
-        agg_B = 0
-        for cs, count in zip(client_states, client_sample_counts):
-            weight = count / total_samples
-            agg_A += cs[layer_name]["A"] * weight
-            agg_B += cs[layer_name]["B"] * weight
-        aggregated[layer_name] = {"A": agg_A, "B": agg_B}
+        agg_B = sum(
+            (count / total_samples) * cs[layer_name]["B"]
+            for cs, count in zip(client_states, client_sample_counts)
+        )
+        # A is identical across all clients since it's frozen, just take first
+        aggregated[layer_name] = {
+            # "A": client_states[0][layer_name]["A"],
+            "B": agg_B,
+        }
     return aggregated
 
 
@@ -282,16 +284,15 @@ def main(args, resume_preempt=False):
     # federated
     encoder_global_lora_state = collect_global_lora_state(encoder)
     predictor_global_lora_state = collect_global_lora_state(predictor)
+    teacher_global_lora_state = collect_global_lora_state(encoder)
     client_local_encoder_states = {i: None for i in range(num_clients)}
-    client_teacher_full_lora_states = {i: None for i in range(num_clients)}
+    client_local_teacher_states = {i: None for i in range(num_clients)}
     client_local_predictor_states = {i: None for i in range(num_clients)}
 
     which_dtype = args.get("meta", {}).get("dtype", "bfloat16")
     if which_dtype.lower() == "bfloat16":
-        # data_type = torch.bfloat16
         mixed = True
     elif which_dtype.lower() == "float16":
-        # data_type = torch.float16
         mixed = True
     else:
         # data_type = torch.float32
@@ -329,31 +330,29 @@ def main(args, resume_preempt=False):
         # global LoRA states collected from each client, to be fedavg'd or scaffolded
         per_client_global_encoder_lora = []
         per_client_global_predictor_lora = []
+        per_client_global_teacher_lora = []
 
         round_m_values = [next(global_momentum_scheduler) for _ in range(local_steps)]
 
         for client_id in range(num_clients):
-            # reset prev data; mostly for first round
-            load_full_lora_state(client_encoder, base_encoder_lora)
-            load_full_lora_state(client_predictor, base_predictor_lora)
-            load_full_lora_state(client_teacher, base_encoder_lora)
+            if round_idx == 0:
+                load_full_lora_state(client_encoder, base_encoder_lora)
+                load_full_lora_state(client_predictor, base_predictor_lora)
+                load_full_lora_state(client_teacher, base_encoder_lora)
 
             # load current global LoRA into all three
             load_global_lora_state(client_encoder, encoder_global_lora_state)
             load_global_lora_state(client_predictor, predictor_global_lora_state)
-            load_global_lora_state(client_teacher, encoder_global_lora_state)
+            load_global_lora_state(client_teacher, teacher_global_lora_state)
 
             # load local states; all have their own locals
             if client_local_encoder_states[client_id] is not None:
                 load_local_lora_state(
                     client_encoder, client_local_encoder_states[client_id]
                 )
-            if client_teacher_full_lora_states[client_id] is not None:
-                # really global only in name
-                # Teacher purely local rn; restore its full LoRA state both adapters
-                # NOTE: To be made different
-                load_full_lora_state(
-                    client_teacher, client_teacher_full_lora_states[client_id]
+            if client_local_teacher_states[client_id] is not None:
+                load_local_lora_state(
+                    client_teacher, client_local_teacher_states[client_id]
                 )
             if client_local_predictor_states[client_id] is not None:
                 load_local_lora_state(
@@ -393,11 +392,14 @@ def main(args, resume_preempt=False):
             per_client_global_predictor_lora.append(
                 collect_global_lora_state(client_predictor)
             )
+            per_client_global_teacher_lora.append(
+                collect_global_lora_state(client_teacher)
+            )
 
             client_local_encoder_states[client_id] = collect_local_lora_state(
                 client_encoder
             )
-            client_teacher_full_lora_states[client_id] = collect_full_lora_state(
+            client_local_teacher_states[client_id] = collect_local_lora_state(
                 client_teacher
             )
             client_local_predictor_states[client_id] = collect_local_lora_state(
@@ -412,6 +414,9 @@ def main(args, resume_preempt=False):
         predictor_global_lora_state = fedavg(
             per_client_global_predictor_lora, client_sample_counts
         )
+        teacher_global_lora_state = fedavg(
+            per_client_global_teacher_lora, client_sample_counts
+        )
 
         load_global_lora_state(encoder, encoder_global_lora_state)
         load_global_lora_state(predictor, predictor_global_lora_state)
@@ -424,8 +429,9 @@ def main(args, resume_preempt=False):
                     "predictor": predictor.state_dict(),
                     "global_encoder_lora": encoder_global_lora_state,
                     "global_predictor_lora": predictor_global_lora_state,
+                    "global_teacher_lora": teacher_global_lora_state,
                     "client_encoder_local_loras": client_local_encoder_states,
-                    "client_teacher_loras": client_teacher_full_lora_states,
+                    "client_teacher_local_loras": client_local_teacher_states,
                     "client_predictor_local_loras": client_local_predictor_states,
                     "round": round_idx + 1,
                 },
