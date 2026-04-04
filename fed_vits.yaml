@@ -1,0 +1,63 @@
+# carry over from pretraining yaml
+meta:
+  dtype: bfloat16
+  use_sdpa: true
+
+model:
+  model_name: vit_small
+  pred_depth: 6
+  pred_embed_dim: 192
+  pred_num_heads: 12
+  uniform_power: true
+  use_mask_tokens: true
+  use_rope: true
+  zero_init_mask_tokens: true
+
+mask:
+  - aspect_ratio: [0.75, 1.5]
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 8
+    spatial_scale: [0.15, 0.15]
+    temporal_scale: [1.0, 1.0]
+  - aspect_ratio: [0.75, 1.5]
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 2
+    spatial_scale: [0.7, 0.7]
+    temporal_scale: [1.0, 1.0]
+
+# federated-specific — new
+num_rounds: 100
+num_clients: 2
+lora_r: 8
+lora_alpha: 16.0
+
+pretrain_checkpoint:
+  pretrain_checkpoint: /workspace/pretrain/latest.pt
+
+data:
+  dataset_type: VideoDataset
+  client_datasets: # one path per client
+    - /data/client_0/videos.csv
+    - /data/client_1/videos.csv
+  batch_size: 64
+  crop_size: 224
+  patch_size: 16
+  dataset_fpcs:
+    - 16
+  tubelet_size: 2
+  fps: 4
+  num_workers: 8
+
+federated:
+  save_dir: /workspace/fed_run
+  resume_checkpoint: /workspace/fed_run/fed_latest.pt
+  save_every: 10
+  local_steps: 50
+  lr: 1.0e-4
+  weight_decay: 0.04
+  loss_exp: 1.0
+  ema: [0.996, 1.0]
