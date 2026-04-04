@@ -12,6 +12,7 @@ Then next round
 """
 
 import copy
+import os
 
 import torch
 import torch.nn.functional as F
@@ -35,6 +36,53 @@ from src.utils.logging import AverageMeter, get_logger
 
 logger = get_logger(__name__)
 
+
+def _prepare_client(
+    client_models,
+    global_lora_states,
+    local_lora_states,
+    client_id,
+    base_loras,
+    round_idx,
+):
+    """Load global + local LoRA states into client models for a given client"""
+    for name, model in client_models.items():
+        if round_idx == 0:
+            load_full_lora_state(model, base_loras[name])
+        load_global_lora_state(model, global_lora_states[name])
+        local = local_lora_states[name][client_id]
+        if local is not None:
+            load_local_lora_state(model, local)
+
+
+def _collect_client(client_models):
+    """collect global & local lora states from client models after training."""
+    global_states = {n: collect_global_lora_state(m) for n, m in client_models.items()}
+    local_states = {n: collect_local_lora_state(m) for n, m in client_models.items()}
+    return global_states, local_states
+
+
+def _reset_global_b_optimizer_state(optimizer, client_encoder, client_predictor):
+    """
+    after fedavg, zero out optimizer moments for global_B bc it's aggregated & not same as prev
+    """
+    global_b_ids = set()
+    for model in [client_encoder, client_predictor]:
+        for name, param in model.named_parameters():
+            if "global_B" in name:
+                global_b_ids.add(id(param))
+
+    for pg in optimizer.param_groups:
+        for param in pg["params"]:
+            if id(param) in global_b_ids:
+                state = optimizer.state[param]
+                if "exp_avg" in state:
+                    state["exp_avg"].zero_()
+                if "exp_avg_sq" in state:
+                    state["exp_avg_sq"].zero_()
+                # reset step count too so Adam LR scaling is fresh
+                if "step" in state:
+                    state["step"] = torch.zeros_like(state["step"]) if isinstance(state["step"], torch.Tensor) else 0
 
 def local_train(
     client_id: int,
@@ -186,9 +234,9 @@ def main(args, resume_preempt=False):
     cfgs_data = args["data"]
     cfgs_model = args["model"]
     cfgs_mask = args["mask"]
-    federated_cfgs = args["federated"]
+    cfgs_pretrain = args["pretrain_checkpoint"]
 
-    # load encoder
+    # load encoder & predictor
     encoder, predictor = init_video_model(
         device=device,
         patch_size=cfgs_data["patch_size"],
@@ -206,9 +254,8 @@ def main(args, resume_preempt=False):
         use_sdpa=args.get("meta", {}).get("use_sdpa", True),
     )
 
-    # load checkpoint of federated training
-    pretrain_ckpt = federated_cfgs["pretrain_checkpoint"]
-    ckpt = torch.load(pretrain_ckpt, map_location="cpu")
+    # load checkpoint of pretraining
+    ckpt = torch.load(cfgs_pretrain["pretrain_checkpoint"], map_location="cpu")
 
     def _clean(sd):
         return {
@@ -217,16 +264,15 @@ def main(args, resume_preempt=False):
 
     encoder.load_state_dict(_clean(ckpt["encoder"]), strict=False)
     predictor.load_state_dict(_clean(ckpt["predictor"]), strict=False)
+
     logger.info("Loaded pretrained encoder and predictor")
 
-    inject_lora(encoder, r=lora_r, alpha=lora_alpha)
-    inject_lora(predictor, r=lora_r, alpha=lora_alpha)
-    freeze_non_lora(encoder)
-    freeze_non_lora(predictor)
+    teacher = copy.deepcopy(encoder)
 
-    # initial loras
-    base_encoder_lora = collect_full_lora_state(encoder)
-    base_predictor_lora = collect_full_lora_state(predictor)
+    # make layers lora & calc trainable parameters
+    for model in [encoder, predictor, teacher]:
+        inject_lora(model, r=lora_r, alpha=lora_alpha)
+        freeze_non_lora(model)
 
     trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
     total = sum(p.numel() for p in encoder.parameters())
@@ -234,6 +280,7 @@ def main(args, resume_preempt=False):
         f"Trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)"
     )
 
+    # data augment & transformations; as train.py in vjepa
     transform = make_transforms(
         random_horizontal_flip=True,
         random_resize_aspect_ratio=cfgs_data.get(
@@ -246,6 +293,7 @@ def main(args, resume_preempt=False):
         crop_size=cfgs_data["crop_size"],
     )
 
+    # mask collator; default
     mask_collator = MaskCollator(
         cfgs_mask=cfgs_mask,
         dataset_fpcs=cfgs_data["dataset_fpcs"],
@@ -255,8 +303,7 @@ def main(args, resume_preempt=False):
     )
 
     # per client data loader
-    client_loaders = []
-    client_sample_counts = []
+    client_loaders, client_sample_counts = [], []
     for i in range(num_clients):
         loader, _ = init_data(
             data=cfgs_data.get("dataset_type", "videodataset"),
@@ -281,13 +328,53 @@ def main(args, resume_preempt=False):
 
         client_sample_counts.append(num_samples)
 
-    # federated
-    encoder_global_lora_state = collect_global_lora_state(encoder)
-    predictor_global_lora_state = collect_global_lora_state(predictor)
-    teacher_global_lora_state = collect_global_lora_state(encoder)
-    client_local_encoder_states = {i: None for i in range(num_clients)}
-    client_local_teacher_states = {i: None for i in range(num_clients)}
-    client_local_predictor_states = {i: None for i in range(num_clients)}
+    client_optimizer_states = {i: None for i in range(num_clients)}
+
+    # load federated checkpoints
+
+    federated_cfgs = args["federated"]
+
+    save_dir = federated_cfgs.get("save_dir", ".")
+    fed_ckpt_path = federated_cfgs.get("resume_checkpoint", None)
+
+    if fed_ckpt_path is not None and os.path.exists(fed_ckpt_path):
+        logger.info(f"Resuming from {fed_ckpt_path}")
+        fed_ckpt = torch.load(fed_ckpt_path, map_location="cpu")
+
+        global_lora_states = fed_ckpt["global_lora_states"]
+        local_lora_states = fed_ckpt["client_local_lora_states"]
+        client_optimizer_states = fed_ckpt.get(
+            "client_optimizer_states", client_optimizer_states
+        )
+        start_round = fed_ckpt["round"]  # resume after this round
+
+        # apply resumed global state to global models
+        load_global_lora_state(encoder, global_lora_states["encoder"])
+        load_global_lora_state(predictor, global_lora_states["predictor"])
+        load_global_lora_state(teacher, global_lora_states["teacher"])
+        # is there global lora states for teacher?
+        logger.info(f"Resumed from round {start_round}")
+    else:
+        # federated (defaults)
+        global_lora_states = {
+            "encoder": collect_global_lora_state(encoder),
+            "predictor": collect_global_lora_state(predictor),
+            "teacher": collect_global_lora_state(teacher),
+        }
+        local_lora_states = {
+            "encoder": {i: None for i in range(num_clients)},
+            "predictor": {i: None for i in range(num_clients)},
+            "teacher": {i: None for i in range(num_clients)},
+        }
+        start_round = 0
+        logger.info("Starting at round 0")
+
+    # initial loras
+    base_loras = {
+        "encoder": collect_full_lora_state(encoder),
+        "predictor": collect_full_lora_state(predictor),
+        "teacher": collect_full_lora_state(teacher),  # same as encoder at init
+    }
 
     which_dtype = args.get("meta", {}).get("dtype", "bfloat16")
     if which_dtype.lower() == "bfloat16":
@@ -319,45 +406,32 @@ def main(args, resume_preempt=False):
         for i in range(total_local_steps)
     )
 
+    # make dict for client models;
     client_encoder = copy.deepcopy(encoder)
-    client_teacher = copy.deepcopy(encoder)  # to be ema'd
+    client_teacher = copy.deepcopy(teacher)  # to be ema'd
     client_predictor = copy.deepcopy(predictor)
-
-    client_optimizer_states = {i: None for i in range(num_clients)}
+    client_models = {
+        "encoder": client_encoder,
+        "predictor": client_predictor,
+        "teacher": client_teacher,
+    }
 
     for round_idx in range(num_rounds):
         logger.info(f"=== Round {round_idx + 1}/{num_rounds} ===")
         # global LoRA states collected from each client, to be fedavg'd or scaffolded
-        per_client_global_encoder_lora = []
-        per_client_global_predictor_lora = []
-        per_client_global_teacher_lora = []
+        per_client_global = {"encoder": [], "predictor": [], "teacher": []}
 
         round_m_values = [next(global_momentum_scheduler) for _ in range(local_steps)]
 
         for client_id in range(num_clients):
-            if round_idx == 0:
-                load_full_lora_state(client_encoder, base_encoder_lora)
-                load_full_lora_state(client_predictor, base_predictor_lora)
-                load_full_lora_state(client_teacher, base_encoder_lora)
-
-            # load current global LoRA into all three
-            load_global_lora_state(client_encoder, encoder_global_lora_state)
-            load_global_lora_state(client_predictor, predictor_global_lora_state)
-            load_global_lora_state(client_teacher, teacher_global_lora_state)
-
-            # load local states; all have their own locals
-            if client_local_encoder_states[client_id] is not None:
-                load_local_lora_state(
-                    client_encoder, client_local_encoder_states[client_id]
-                )
-            if client_local_teacher_states[client_id] is not None:
-                load_local_lora_state(
-                    client_teacher, client_local_teacher_states[client_id]
-                )
-            if client_local_predictor_states[client_id] is not None:
-                load_local_lora_state(
-                    client_predictor, client_local_predictor_states[client_id]
-                )
+            _prepare_client(
+                client_models,
+                global_lora_states,
+                local_lora_states,
+                client_id,
+                base_loras,
+                round_idx,
+            )
 
             lora_params = [
                 p for p in client_encoder.parameters() if p.requires_grad
@@ -369,6 +443,8 @@ def main(args, resume_preempt=False):
             )
             if client_optimizer_states[client_id] is not None:
                 optimizer.load_state_dict(client_optimizer_states[client_id])
+                # reset global_B moments since FedAvg overwrote those params
+                _reset_global_b_optimizer_state(optimizer, client_encoder, client_predictor)
 
             local_train(
                 client_id=client_id,
@@ -386,54 +462,32 @@ def main(args, resume_preempt=False):
 
             client_optimizer_states[client_id] = optimizer.state_dict()
 
-            per_client_global_encoder_lora.append(
-                collect_global_lora_state(client_encoder)
-            )
-            per_client_global_predictor_lora.append(
-                collect_global_lora_state(client_predictor)
-            )
-            per_client_global_teacher_lora.append(
-                collect_global_lora_state(client_teacher)
-            )
-
-            client_local_encoder_states[client_id] = collect_local_lora_state(
-                client_encoder
-            )
-            client_local_teacher_states[client_id] = collect_local_lora_state(
-                client_teacher
-            )
-            client_local_predictor_states[client_id] = collect_local_lora_state(
-                client_predictor
-            )
+            g_states, l_states = _collect_client(client_models)
+            for name in per_client_global:
+                per_client_global[name].append(g_states[name])
+                local_lora_states[name][client_id] = l_states[name]
 
         # aggregate & update global LoRA state
         # fedavg for now
-        encoder_global_lora_state = fedavg(
-            per_client_global_encoder_lora, client_sample_counts
-        )
-        predictor_global_lora_state = fedavg(
-            per_client_global_predictor_lora, client_sample_counts
-        )
-        teacher_global_lora_state = fedavg(
-            per_client_global_teacher_lora, client_sample_counts
-        )
+        for name in global_lora_states:
+            global_lora_states[name] = fedavg(
+                per_client_global[name], client_sample_counts
+            )
 
-        load_global_lora_state(encoder, encoder_global_lora_state)
-        load_global_lora_state(predictor, predictor_global_lora_state)
+        load_global_lora_state(encoder, global_lora_states["encoder"])
+        load_global_lora_state(predictor, global_lora_states["predictor"])
+        load_global_lora_state(teacher, global_lora_states["teacher"])
         logger.info(f"Round {round_idx + 1} aggregation complete.")
+
+        save_path = os.path.join(save_dir, f"fed_ckpt_round{round_idx + 1}.pt")
 
         if (round_idx + 1) % federated_cfgs.get("save_every", 10) == 0:
             torch.save(
                 {
-                    "encoder": encoder.state_dict(),
-                    "predictor": predictor.state_dict(),
-                    "global_encoder_lora": encoder_global_lora_state,
-                    "global_predictor_lora": predictor_global_lora_state,
-                    "global_teacher_lora": teacher_global_lora_state,
-                    "client_encoder_local_loras": client_local_encoder_states,
-                    "client_teacher_local_loras": client_local_teacher_states,
-                    "client_predictor_local_loras": client_local_predictor_states,
+                    "global_lora_states": global_lora_states,
+                    "client_local_lora_states": local_lora_states,
+                    "client_optimizer_states": client_optimizer_states,
                     "round": round_idx + 1,
                 },
-                f"fed_ckpt_round{round_idx + 1}.pt",
-            )
+                save_path,
+            ) # needs to separately load latest.pt
