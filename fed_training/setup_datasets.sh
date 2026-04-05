@@ -2,7 +2,7 @@
 
 set -e
 
-DRIVE_DIR="/content/drive/MyDrive/preprocessed_datasets"
+DRIVE_DIR="/content/drive/MyDrive/vjepa_preprocessed_datasets"
 LOCAL_DIR="/content/vjepa2_federated/fed_training"
 
 # helper: transcode one video to 256p @ 4fps 
