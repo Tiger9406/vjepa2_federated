@@ -13,6 +13,7 @@ Then next round
 
 import copy
 import os
+import time
 
 import torch
 import torch.nn.functional as F
@@ -120,10 +121,51 @@ def local_train(
     loader = iter(data_loader)
     loss_meter = AverageMeter()  # for logging
 
+    t_data   = AverageMeter()  # data fetch + H→D transfer
+    t_fwd_tgt = AverageMeter() # teacher forward
+    t_fwd_ctx = AverageMeter() # student encoder + predictor forward
+    t_loss   = AverageMeter()  # loss computation
+    t_bwd    = AverageMeter()  # backward + optimizer step
+    t_ema    = AverageMeter()  # EMA update
+    t_total  = AverageMeter()  # wall time per step
+
     ema_params_q = [p for p in encoder.parameters() if p.requires_grad]
     ema_params_k = [p for p, p_q in zip(target_encoder.parameters(), encoder.parameters()) if p_q.requires_grad]
 
+    def forward_target(clips):
+        with torch.no_grad():
+            h = target_encoder(clips)
+            h = [F.layer_norm(hi, (hi.size(-1),)) for hi in h]
+        return h
+
+    # forward context: mask through student encoder then predictor
+    def forward_context(clips):
+        z = encoder(clips, all_masks_enc)
+        # NOTE: Apparently not forward compatible with vjepa 2_1
+        z = predictor(z, all_masks_enc, all_masks_pred)
+        return z
+
+    # predictor returns masked tokens, apply target masks to teacher output
+    def loss_fn(z, h):
+        h_masked = [
+            apply_masks(hi, mi, concat=False)
+            for hi, mi in zip(h, all_masks_pred)
+        ]
+        loss, n = 0, 0
+        for zi, hi in zip(z, h_masked):
+            for zij, hij in zip(zi, hi):
+                loss += torch.mean(torch.abs(zij - hij) ** loss_exp) / loss_exp
+                n += 1
+        loss /= n
+        return loss
+    
+    def _cuda_ms():
+        """Return wall-clock ms after syncing CUDA so timings are accurate."""
+        torch.cuda.synchronize()
+        return time.perf_counter() * 1000.0
+    
     for step in range(local_steps):
+        t0 = _cuda_ms()
         # load next batch of data
         try:
             sample = next(loader)
@@ -141,39 +183,25 @@ def local_train(
             all_masks_enc.append([m.to(device, non_blocking=True) for m in masks_enc])
             all_masks_pred.append([m.to(device, non_blocking=True) for m in masks_pred])
 
+        t1 = _cuda_ms()
+        t_data.update(t1 - t0)
+
         # then we run a forward path with teacher
-        with torch.cuda.amp.autocast(dtype=data_type, enabled=mixed):
-            # forward target: teacher full unmasked
-            def forward_target(clips):
-                with torch.no_grad():
-                    h = target_encoder(clips)
-                    h = [F.layer_norm(hi, (hi.size(-1),)) for hi in h]
-                return h
-
-            # forward context: mask through student encoder then predictor
-            def forward_context(clips):
-                z = encoder(clips, all_masks_enc)
-                # NOTE: Apparently not forward compatible with vjepa 2_1
-                z = predictor(z, all_masks_enc, all_masks_pred)
-                return z
-
-            # predictor returns masked tokens, apply target masks to teacher output
-            def loss_fn(z, h):
-                h_masked = [
-                    apply_masks(hi, mi, concat=False)
-                    for hi, mi in zip(h, all_masks_pred)
-                ]
-                loss, n = 0, 0
-                for zi, hi in zip(z, h_masked):
-                    for zij, hij in zip(zi, hi):
-                        loss += torch.mean(torch.abs(zij - hij) ** loss_exp) / loss_exp
-                        n += 1
-                loss /= n
-                return loss
-
+        with torch.amp.autocast("cuda", dtype=data_type, enabled=mixed):
+            # teacher forward
             h = forward_target(all_clips)
-            z = forward_context(all_clips)
-            loss = loss_fn(z, h)
+            t2 = _cuda_ms()
+            t_fwd_tgt.update(t2 - t1)
+ 
+            # student + predictor forward
+            z = forward_context(all_clips, all_masks_enc, all_masks_pred)
+            t3 = _cuda_ms()
+            t_fwd_ctx.update(t3 - t2)
+ 
+            # loss
+            loss = loss_fn(z, h, all_masks_pred)
+            t4 = _cuda_ms()
+            t_loss.update(t4 - t3)
 
         if mixed:
             scaler.scale(loss).backward()
@@ -185,22 +213,43 @@ def local_train(
             scaler.update()
         else:
             optimizer.step()
-
+        
         # backwards and optimizer
         optimizer.zero_grad()
+        t5 = _cuda_ms()
+        t_bwd.update(t5 - t4)
 
         # then do teacher ema update
-
         m = m_schedule[step]
         with torch.no_grad():
             torch._foreach_mul_(ema_params_k, m)
             torch._foreach_add_(ema_params_k, ema_params_q, alpha=1.0 - m)
+
+        t6 = _cuda_ms()
+        t_ema.update(t6 - t5)
+
         loss_meter.update(float(loss))
+
+        t_total.update(t6-t0)
 
         if step % 10 == 0:
             logger.info(
-                f"[Client {client_id}] step {step}/{local_steps}  loss={loss_meter.avg:.4f}"
+                f"[Client {client_id}] step {step}/{local_steps}  loss={loss_meter.avg:.4f}  "
+                f"step={t_total.avg:.0f}ms  "
+                f"[data={t_data.avg:.0f}  tgt={t_fwd_tgt.avg:.0f}  "
+                f"ctx={t_fwd_ctx.avg:.0f}  loss={t_loss.avg:.0f}  "
+                f"bwd={t_bwd.avg:.0f}  ema={t_ema.avg:.0f}]ms"
             )
+
+    logger.info(
+        f"[Client {client_id}] DONE  avg step={t_total.avg:.0f}ms | "
+        f"data={t_data.avg:.0f}ms ({100*t_data.avg/t_total.avg:.1f}%)  "
+        f"tgt_fwd={t_fwd_tgt.avg:.0f}ms ({100*t_fwd_tgt.avg/t_total.avg:.1f}%)  "
+        f"ctx_fwd={t_fwd_ctx.avg:.0f}ms ({100*t_fwd_ctx.avg/t_total.avg:.1f}%)  "
+        f"loss={t_loss.avg:.0f}ms ({100*t_loss.avg/t_total.avg:.1f}%)  "
+        f"bwd={t_bwd.avg:.0f}ms ({100*t_bwd.avg/t_total.avg:.1f}%)  "
+        f"ema={t_ema.avg:.0f}ms ({100*t_ema.avg/t_total.avg:.1f}%)"
+    )
 
 
 def fedavg(client_states, client_sample_counts):
@@ -213,7 +262,7 @@ def fedavg(client_states, client_sample_counts):
         )
         # A is identical across all clients since it's frozen, just take first
         aggregated[layer_name] = {
-            # "A": client_states[0][layer_name]["A"],
+            "A": client_states[0][layer_name]["A"],
             "B": agg_B,
         }
     return aggregated
@@ -317,6 +366,8 @@ def main(args, resume_preempt=False):
             num_workers=cfgs_data.get("num_workers", 4),
             world_size=1,
             rank=0,
+            pin_mem=cfgs_data.get("pin_mem", True),
+            persistent_workers=cfgs_data.get("persistent_workers", True),
         )
         client_loaders.append(loader)
 
@@ -379,13 +430,17 @@ def main(args, resume_preempt=False):
     which_dtype = args.get("meta", {}).get("dtype", "bfloat16")
     if which_dtype.lower() == "bfloat16":
         mixed = True
+        use_scaler = False
     elif which_dtype.lower() == "float16":
         mixed = True
+        use_scaler = True
     else:
         # data_type = torch.float32
         mixed = False
+        use_scaler = False
+
     client_scalers = {
-        i: torch.cuda.amp.GradScaler() if mixed else None for i in range(num_clients)
+        i: torch.amp.GradScaler() if mixed else None for i in range(num_clients)
     }
 
     local_steps = federated_cfgs.get("local_steps", 50)
@@ -397,14 +452,7 @@ def main(args, resume_preempt=False):
         "dtype": args.get("meta", {}).get("dtype", "bfloat16"),
     }
 
-    total_local_steps = num_rounds * local_steps
-    ema_start = federated_cfgs.get("ema", [0.996, 1.0])[0]
-    ema_end = federated_cfgs.get("ema", [0.996, 1.0])[1]
 
-    global_momentum_scheduler = (
-        ema_start + i * (ema_end - ema_start) / total_local_steps
-        for i in range(total_local_steps)
-    )
 
     # make dict for client models;
     client_encoder = copy.deepcopy(encoder)
@@ -416,6 +464,29 @@ def main(args, resume_preempt=False):
         "teacher": client_teacher,
     }
 
+    # calculate local steps required 
+    base_steps = federated_cfgs.get("local_steps", 50)
+    total_samples_all = sum(client_sample_counts)
+    client_local_steps = []
+    for cnt in client_sample_counts:
+        ratio = cnt / total_samples_all
+        steps = max(1, round(ratio * base_steps * num_clients))
+        client_local_steps.append(steps)
+    logger.info(
+        "Dynamic local steps per client: "
+        + ", ".join(f"client_{i}={s}" for i, s in enumerate(client_local_steps))
+        + f"  (base={base_steps}, proportional to dataset size)"
+    )
+    # Update local_cfgs and total_local_steps to use the max steps for scheduler
+    max_local_steps = max(client_local_steps)
+    total_local_steps = num_rounds * max_local_steps
+    ema_start = federated_cfgs.get("ema", [0.996, 1.0])[0]
+    ema_end   = federated_cfgs.get("ema", [0.996, 1.0])[1]
+    global_momentum_scheduler = (
+        ema_start + i * (ema_end - ema_start) / total_local_steps
+        for i in range(total_local_steps)
+    )
+
     for round_idx in range(num_rounds):
         logger.info(f"=== Round {round_idx + 1}/{num_rounds} ===")
         # global LoRA states collected from each client, to be fedavg'd or scaffolded
@@ -424,6 +495,7 @@ def main(args, resume_preempt=False):
         round_m_values = [next(global_momentum_scheduler) for _ in range(local_steps)]
 
         for client_id in range(num_clients):
+            round_start = time.perf_counter()
             _prepare_client(
                 client_models,
                 global_lora_states,
@@ -448,18 +520,26 @@ def main(args, resume_preempt=False):
                     optimizer, client_encoder, client_predictor
                 )
 
+            client_steps = client_local_steps[client_id]
+            client_cfgs = {**local_cfgs, "local_steps": client_steps}
+            client_start = time.perf_counter()
+
             local_train(
                 client_id=client_id,
                 encoder=client_encoder,
                 predictor=client_predictor,
                 target_encoder=client_teacher,
                 data_loader=client_loaders[client_id],
-                cfgs=local_cfgs,
-                m_schedule=round_m_values,
+                cfgs=client_cfgs,
+                m_schedule=round_m_values[:client_steps],
                 scaler=client_scalers[client_id],
                 optimizer=optimizer,
                 mixed=mixed,
                 device=device,
+            )
+
+            logger.info(
+                f"[Client {client_id}] wall time: {time.perf_counter() - client_start:.1f}s"
             )
 
             client_optimizer_states[client_id] = optimizer.state_dict()
@@ -479,7 +559,12 @@ def main(args, resume_preempt=False):
         load_global_lora_state(encoder, global_lora_states["encoder"])
         load_global_lora_state(predictor, global_lora_states["predictor"])
         load_global_lora_state(teacher, global_lora_states["teacher"])
-        logger.info(f"Round {round_idx + 1} aggregation complete.")
+        round_elapsed = time.perf_counter() - round_start
+        logger.info(
+            f"Round {round_idx + 1} complete — "
+            f"total wall time: {round_elapsed:.1f}s  "
+            f"({round_elapsed/num_clients:.1f}s avg per client)"
+        )
 
         latest_save_path = os.path.join(save_dir, "fed_latest.pt")
         torch.save(
