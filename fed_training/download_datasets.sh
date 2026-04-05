@@ -23,10 +23,20 @@ echo "BDD100K ready!!"
 
 # Epic kitchen
 echo "Downloading EPIC-KITCHENS"
-echo "Downloading EPIC-KITCHENS P01 raw videos..."
+echo "Downloading EPIC-KITCHENS P01 raw videos 1 and 2"
 
-git clone https://github.com/epic-kitchens/epic-kitchens-download-scripts.git
-cd ./epic-kitchens-download-scripts/
-python ./epic_downloader.py --videos --participants P01 --output-path ./../fed_training/epic/
+mkdir -p /content/vjepa2_federated/fed_training/epic/EPIC-KITCHENS/P01/videos/
+
+# Download Video 1 (P01_01)
+aria2c -x 16 -s 16 \
+  -d /content/vjepa2_federated/fed_training/epic/EPIC-KITCHENS/P01/videos/ \
+  -o P01_01.MP4 \
+  https://data.bris.ac.uk/datasets/3h91syskeag572hl6tvuovwv4d/videos/train/P01/P01_01.MP4
+
+# Download Video 2 (P01_02)
+aria2c -x 16 -s 16 \
+  -d /content/vjepa2_federated/fed_training/epic/EPIC-KITCHENS/P01/videos/ \
+  -o P01_02.MP4 \
+  https://data.bris.ac.uk/datasets/3h91syskeag572hl6tvuovwv4d/videos/train/P01/P01_02.MP4
 
 echo "EPIC-KITCHENS ready."
