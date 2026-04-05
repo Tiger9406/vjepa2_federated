@@ -14,6 +14,8 @@ Then next round
 import copy
 import os
 import time
+import csv
+import datetime
 
 import torch
 import torch.nn.functional as F
@@ -92,6 +94,8 @@ def _reset_global_b_optimizer_state(optimizer, client_encoder, client_predictor)
 
 def local_train(
     client_id: int,
+    round_num: int,
+    csv_path: str,
     encoder,  # student
     predictor,
     target_encoder,  # teacher
@@ -226,6 +230,14 @@ def local_train(
                 f"ctx={t_fwd_ctx.avg:.0f}  loss={t_loss.avg:.0f}  "
                 f"bwd={t_bwd.avg:.0f}  ema={t_ema.avg:.0f}]ms"
             )
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(csv_path, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    now, round_num, client_id, step, f"{loss_meter.avg:.4f}",
+                    f"{t_total.avg:.0f}", f"{t_data.avg:.0f}", f"{t_fwd_tgt.avg:.0f}",
+                    f"{t_fwd_ctx.avg:.0f}", f"{t_loss.avg:.0f}", f"{t_bwd.avg:.0f}", f"{t_ema.avg:.0f}"
+                ])
 
     logger.info(
         f"[Client {client_id}] DONE  avg step={t_total.avg:.0f}ms | "
@@ -438,8 +450,6 @@ def main(args, resume_preempt=False):
         "dtype": args.get("meta", {}).get("dtype", "bfloat16"),
     }
 
-    # (momentum scheduler is built after dynamic local_steps are computed below)
-
     # make dict for client models;
     client_encoder = copy.deepcopy(encoder)
     client_teacher = copy.deepcopy(teacher)  # to be ema'd
@@ -466,7 +476,7 @@ def main(args, resume_preempt=False):
         + f"  (base={base_steps}, proportional to dataset size)"
     )
     # Update local_cfgs and total_local_steps to use the max steps for scheduler
-    max_local_steps = max(client_local_steps)
+    # max_local_steps = max(client_local_steps)
     total_local_steps = num_rounds * sum(client_local_steps)
     ema_start = federated_cfgs.get("ema", [0.996, 1.0])[0]
     ema_end   = federated_cfgs.get("ema", [0.996, 1.0])[1]
@@ -474,7 +484,17 @@ def main(args, resume_preempt=False):
         ema_start + i * (ema_end - ema_start) / total_local_steps
         for i in range(total_local_steps)
     )
-    # ---------------------------------------------------------------------------
+
+    # csv setup
+    csv_path = os.path.join(save_dir, "training_logs.csv")
+    if start_round == 0 and not os.path.exists(csv_path):
+        with open(csv_path, mode='w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Timestamp", "Round", "Client", "Step", "Loss", 
+                "Total_Step_ms", "Data_ms", "Tgt_Fwd_ms", 
+                "Ctx_Fwd_ms", "Loss_ms", "Bwd_ms", "Ema_ms"
+            ])
 
     for round_idx in range(num_rounds):
         round_start = time.perf_counter()
@@ -514,6 +534,8 @@ def main(args, resume_preempt=False):
             client_start = time.perf_counter()
             local_train(
                 client_id=client_id,
+                round_num = round_idx+1,
+                csv_path = csv_path,
                 encoder=client_encoder,
                 predictor=client_predictor,
                 target_encoder=client_teacher,
