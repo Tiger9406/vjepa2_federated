@@ -120,6 +120,9 @@ def local_train(
     loader = iter(data_loader)
     loss_meter = AverageMeter()  # for logging
 
+    ema_params_q = [p for p in encoder.parameters() if p.requires_grad]
+    ema_params_k = [p for p, p_q in zip(target_encoder.parameters(), encoder.parameters()) if p_q.requires_grad]
+
     for step in range(local_steps):
         # load next batch of data
         try:
@@ -190,16 +193,8 @@ def local_train(
 
         m = m_schedule[step]
         with torch.no_grad():
-            params_k, params_q = [], []
-            for param_q, param_k in zip(
-                encoder.parameters(), target_encoder.parameters()
-            ):
-                if param_q.requires_grad:  # Only apply EMA to trainable LoRA params
-                    params_k.append(param_k)
-                    params_q.append(param_q)
-            torch._foreach_mul_(params_k, m)
-            torch._foreach_add_(params_k, params_q, alpha=1.0 - m)
-
+            torch._foreach_mul_(ema_params_k, m)
+            torch._foreach_add_(ema_params_k, ema_params_q, alpha=1.0 - m)
         loss_meter.update(float(loss))
 
         if step % 10 == 0:
@@ -312,7 +307,7 @@ def main(args, resume_preempt=False):
     for i in range(num_clients):
         loader, _ = init_data(
             data=cfgs_data.get("dataset_type", "videodataset"),
-            root_path=cfgs_data["client_datasets"][i],
+            root_path=[cfgs_data["client_datasets"][i]],  # wrap in a list
             batch_size=cfgs_data["batch_size"],
             training=True,
             dataset_fpcs=cfgs_data["dataset_fpcs"],

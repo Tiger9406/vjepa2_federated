@@ -57,6 +57,8 @@ data:
   tubelet_size: 2
   fps: 4
   num_workers: 8
+  pin_mem: True
+  persistent_workers: True
 
 federated:
   save_dir: /content/drive/MyDrive/fed_run
