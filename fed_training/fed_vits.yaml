@@ -1,6 +1,6 @@
 # carry over from pretraining yaml
 app: fed_vjepa
-folder: /content/drive/MyDrive/fed_run/logs
+folder: /content/drive/MyDrive/vjepa/fed_run/logs
 
 meta:
   dtype: bfloat16
@@ -34,7 +34,7 @@ mask:
 
 # federated-specific — new
 num_rounds: 100
-num_clients: 2
+num_clients: 12
 lora_r: 8
 lora_alpha: 16.0
 
@@ -43,12 +43,33 @@ pretrain_checkpoint:
 
 data:
   dataset_type: VideoDataset
-  client_datasets: # one path per client
-    - /content/vjepa2_federated/fed_training/client_0/videos.csv
-    - /content/vjepa2_federated/fed_training/client_1/videos.csv
+  dataset_type: VideoDataset
+  client_datasets:
+    - /content/vjepa2_federated/fed_training/client_epic_P01/videos.csv
+    - /content/vjepa2_federated/fed_training/client_epic_P02/videos.csv
+    - /content/vjepa2_federated/fed_training/client_epic_P04/videos.csv
+    - /content/vjepa2_federated/fed_training/client_bdd_00/videos.csv
+    - /content/vjepa2_federated/fed_training/client_bdd_01/videos.csv
+    - /content/vjepa2_federated/fed_training/client_bdd_02/videos.csv
+    - /content/vjepa2_federated/fed_training/client_bdd_03/videos.csv
+    - /content/vjepa2_federated/fed_training/client_bdd_04/videos.csv
+    - /content/vjepa2_federated/fed_training/client_hmdb_0/videos.csv
+    - /content/vjepa2_federated/fed_training/client_hmdb_1/videos.csv
+    - /content/vjepa2_federated/fed_training/client_hmdb_2/videos.csv
+    - /content/vjepa2_federated/fed_training/client_hmdb_3/videos.csv
   client_datasets_path:
-    - /content/vjepa2_federated/fed_training/bdd_256/
-    - /content/vjepa2_federated/fed_training/epic/clips/
+    - /content/vjepa2_federated/fed_training/client_epic_P01/
+    - /content/vjepa2_federated/fed_training/client_epic_P02/
+    - /content/vjepa2_federated/fed_training/client_epic_P04/
+    - /content/vjepa2_federated/fed_training/client_bdd_00/
+    - /content/vjepa2_federated/fed_training/client_bdd_01/
+    - /content/vjepa2_federated/fed_training/client_bdd_02/
+    - /content/vjepa2_federated/fed_training/client_bdd_03/
+    - /content/vjepa2_federated/fed_training/client_bdd_04/
+    - /content/vjepa2_federated/fed_training/client_hmdb_0/
+    - /content/vjepa2_federated/fed_training/client_hmdb_1/
+    - /content/vjepa2_federated/fed_training/client_hmdb_2/
+    - /content/vjepa2_federated/fed_training/client_hmdb_3/
   batch_size: 16
   crop_size: 224
   patch_size: 16
@@ -61,8 +82,8 @@ data:
   persistent_workers: True
 
 federated:
-  save_dir: /content/drive/MyDrive/fed_run
-  resume_checkpoint: /content/drive/MyDrive/fed_run/fed_latest.pt
+  save_dir: /content/drive/MyDrive/vjepa/fed_run
+  resume_checkpoint: /content/drive/MyDrive/vjepa/fed_run/fed_latest.pt
   save_every: 10
   local_steps: 50
   lr: 1.0e-4
