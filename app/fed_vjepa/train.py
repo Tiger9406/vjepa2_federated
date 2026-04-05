@@ -101,7 +101,7 @@ def local_train(
     target_encoder,  # teacher
     data_loader,
     cfgs,
-    m_schedule,   # iterable/generator — consumed lazily, one value per step
+    m_schedule,   # array of m values
     scaler,
     optimizer,
     mixed,
@@ -198,7 +198,20 @@ def local_train(
             t4 = _cuda_ms()
             t_loss.update(t4 - t3)
 
-        # ── Backward + optimizer step ─────────────────────────────────────────
+        # backward + optimizer step
+        """
+        Optimizer: adamw optimizer; adaptive gradient optimizer
+        for each trainable param it keeps 1st and second gradient (averaged)
+        adaptively scale learning rate per parameter; crazy
+        - except bc we aggregate global B matrices, momentums there go to zero; drawback of federation ig
+        unless we aggregate global optimizer as well for global b...
+        could look into aggregating this; but idkkkk apparently each client's loss landscape is unique so not really too applicable
+
+        Scaler on the other hand only matters for float16 mixed prec. it can underflow to zero
+        for small values; multiplies loss by a large scale before backprop
+        so gradients can survive, then unscale; our code is bfloat16 which skips this; but
+        original code had it so we keep it ig
+        """
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -211,8 +224,8 @@ def local_train(
         t5 = _cuda_ms()
         t_bwd.update(t5 - t4)
 
-        # ── EMA update of teacher ─────────────────────────────────────────────
-        m = next(m_schedule)
+        # ema update of teacher
+        m = m_schedule[step]
         with torch.no_grad():
             torch._foreach_mul_(ema_params_k, m)
             torch._foreach_add_(ema_params_k, ema_params_q, alpha=1.0 - m)
@@ -476,14 +489,9 @@ def main(args, resume_preempt=False):
         + f"  (base={base_steps}, proportional to dataset size)"
     )
     # Update local_cfgs and total_local_steps to use the max steps for scheduler
-    # max_local_steps = max(client_local_steps)
-    total_local_steps = num_rounds * sum(client_local_steps)
+    
     ema_start = federated_cfgs.get("ema", [0.996, 1.0])[0]
     ema_end   = federated_cfgs.get("ema", [0.996, 1.0])[1]
-    global_momentum_scheduler = (
-        ema_start + i * (ema_end - ema_start) / total_local_steps
-        for i in range(total_local_steps)
-    )
 
     # csv setup
     csv_path = os.path.join(save_dir, "training_logs.csv")
@@ -502,8 +510,6 @@ def main(args, resume_preempt=False):
         # global LoRA states collected from each client, to be fedavg'd or scaffolded
         per_client_global = {"encoder": [], "predictor": [], "teacher": []}
 
-        # Don't pre-draw — pass the generator directly so each client consumes
-        # exactly client_local_steps[client_id] values and no more.
         for client_id in range(num_clients):
             _prepare_client(
                 client_models,
@@ -513,7 +519,6 @@ def main(args, resume_preempt=False):
                 base_loras,
                 round_idx,
             )
-
             lora_params = [
                 p for p in client_encoder.parameters() if p.requires_grad
             ] + [p for p in client_predictor.parameters() if p.requires_grad]
@@ -531,6 +536,14 @@ def main(args, resume_preempt=False):
 
             client_steps = client_local_steps[client_id]
             client_cfgs = {**local_cfgs, "local_steps": client_steps}
+
+            total_client_steps = num_rounds * client_steps
+            current_base_step = round_idx * client_steps
+            client_m_schedule = [
+                ema_start + (current_base_step + step) * (ema_end - ema_start) / total_client_steps
+                for step in range(client_steps)
+            ]
+
             client_start = time.perf_counter()
             local_train(
                 client_id=client_id,
@@ -541,7 +554,7 @@ def main(args, resume_preempt=False):
                 target_encoder=client_teacher,
                 data_loader=client_loaders[client_id],
                 cfgs=client_cfgs,
-                m_schedule=global_momentum_scheduler,
+                m_schedule=client_m_schedule,
                 scaler=client_scalers[client_id],
                 optimizer=optimizer,
                 mixed=mixed,
