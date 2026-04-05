@@ -49,7 +49,7 @@ data:
   client_datasets_path:
     - /content/vjepa2_federated/fed_training/bdd/
     - /content/vjepa2_federated/fed_training/epic/
-  batch_size: 64
+  batch_size: 16
   crop_size: 224
   patch_size: 16
   dataset_fpcs:
