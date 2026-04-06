@@ -12,7 +12,7 @@ echo "Fetching file list from $REPO_ID..."
 FILES=$(python3 -c "
 from huggingface_hub import HfApi
 api = HfApi()
-files = [f.rfilename for f in api.list_repo_files(repo_id='$REPO_ID', repo_type='dataset')]
+files = api.list_repo_files(repo_id='$REPO_ID', repo_type='dataset')
 print(' '.join([f for f in files if f.endswith('.tar.gz')]))
 ")
 
@@ -25,6 +25,7 @@ for FILE in $FILES; do
     
     # Download archive
     python3 -c "
+import os
 from huggingface_hub import hf_hub_download
 hf_hub_download(
     repo_id='$REPO_ID',
