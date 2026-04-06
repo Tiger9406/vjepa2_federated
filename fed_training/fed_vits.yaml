@@ -34,7 +34,7 @@ mask:
 
 # federated-specific — new
 num_rounds: 100
-num_clients: 12
+num_clients: 8
 lora_r: 8
 lora_alpha: 16.0
 
@@ -47,12 +47,8 @@ data:
   client_datasets:
     - /content/vjepa2_federated/fed_training/client_epic_P01/videos.csv
     - /content/vjepa2_federated/fed_training/client_epic_P02/videos.csv
-    - /content/vjepa2_federated/fed_training/client_epic_P04/videos.csv
     - /content/vjepa2_federated/fed_training/client_bdd_00/videos.csv
-    - /content/vjepa2_federated/fed_training/client_bdd_01/videos.csv
     - /content/vjepa2_federated/fed_training/client_bdd_02/videos.csv
-    - /content/vjepa2_federated/fed_training/client_bdd_03/videos.csv
-    - /content/vjepa2_federated/fed_training/client_bdd_04/videos.csv
     - /content/vjepa2_federated/fed_training/client_hmdb_0/videos.csv
     - /content/vjepa2_federated/fed_training/client_hmdb_1/videos.csv
     - /content/vjepa2_federated/fed_training/client_hmdb_2/videos.csv
@@ -60,12 +56,8 @@ data:
   client_datasets_path:
     - /content/vjepa2_federated/fed_training/client_epic_P01/
     - /content/vjepa2_federated/fed_training/client_epic_P02/
-    - /content/vjepa2_federated/fed_training/client_epic_P04/
     - /content/vjepa2_federated/fed_training/client_bdd_00/
-    - /content/vjepa2_federated/fed_training/client_bdd_01/
     - /content/vjepa2_federated/fed_training/client_bdd_02/
-    - /content/vjepa2_federated/fed_training/client_bdd_03/
-    - /content/vjepa2_federated/fed_training/client_bdd_04/
     - /content/vjepa2_federated/fed_training/client_hmdb_0/
     - /content/vjepa2_federated/fed_training/client_hmdb_1/
     - /content/vjepa2_federated/fed_training/client_hmdb_2/
