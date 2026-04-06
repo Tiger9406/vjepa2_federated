@@ -9,11 +9,13 @@ sudo apt-get update -yq
 sudo apt-get install -yq aria2 ffmpeg unrar unzip python3
 pip install -q huggingface-hub
 
-python3 -c "
-import os
-from huggingface_hub import login
-login(token=os.environ['HF_TOKEN'])
-"
+if nvidia-smi &>/dev/null; then
+    echo "GPU detected — using NVENC for transcoding."
+    VIDEO_CODEC="-c:v h264_nvenc -preset fast"
+else
+    echo "No GPU detected — using CPU (libx264)."
+    VIDEO_CODEC="-c:v libx264 -preset veryfast -crf 23"
+fi
 
 transcode_video() {
     local src="$1"
@@ -24,7 +26,7 @@ transcode_video() {
     ffmpeg -y -i "$src" \
         -vf "scale=256:-2" \
         -r 4 \
-        -c:v libx264 -preset veryfast -crf 23 \
+        $VIDEO_CODEC \
         -an \
         "$dst" 2>/dev/null
     echo "  -> Created $dst"
@@ -73,11 +75,11 @@ for i in $(seq 0 $((NUM_CLIENTS - 1))); do
     CLIENT_NAME="client_hmdb_${i}"
 
     if python3 -c "
-    from huggingface_hub import HfApi
-    api = HfApi()
-    files = [f.rfilename for f in api.list_repo_files(repo_id='tiger9406/fed-client-dataset', repo_type='dataset')]
-    exit(0 if '${CLIENT_NAME}.tar.gz' in files else 1)
-    "; then
+import os
+from huggingface_hub import list_repo_files
+files = list(list_repo_files(repo_id='tiger9406/fed-client-dataset', repo_type='dataset', token=os.environ['HF_TOKEN']))
+exit(0 if '${CLIENT_NAME}.tar.gz' in files else 1)
+"; then
         echo "[$CLIENT_NAME] Already exists on HF. Skipping."
         continue
     fi
@@ -91,15 +93,17 @@ for i in $(seq 0 $((NUM_CLIENTS - 1))); do
     tar -czf "${LOCAL_DIR}/${CLIENT_NAME}.tar.gz" -C "${LOCAL_DIR}/${CLIENT_NAME}" .
 
     python3 -c "
-    from huggingface_hub import HfApi
-    api = HfApi()
-    api.upload_file(
-        path_or_fileobj='${LOCAL_DIR}/${CLIENT_NAME}.tar.gz',
-        path_in_repo='${CLIENT_NAME}.tar.gz',
-        repo_id='tiger9406/fed-client-dataset',
-        repo_type='dataset'
-    )
-    "
+from huggingface_hub import HfApi, login
+import os
+login(token=os.environ['HF_TOKEN'])
+api = HfApi()
+api.upload_file(
+    path_or_fileobj='${LOCAL_DIR}/${CLIENT_NAME}.tar.gz',
+    path_in_repo='${CLIENT_NAME}.tar.gz',
+    repo_id='tiger9406/fed-client-dataset',
+    repo_type='dataset'
+)
+"
 
     echo "  Cleaning up local files for $CLIENT_NAME..."
     rm -rf "${LOCAL_DIR}/${CLIENT_NAME}.tar.gz" "${LOCAL_DIR}/${CLIENT_NAME}"
