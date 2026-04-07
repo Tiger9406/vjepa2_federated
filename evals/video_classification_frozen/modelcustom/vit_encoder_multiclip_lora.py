@@ -61,10 +61,8 @@ def init_module(
     global_lora_states = fed_ckpt["global_lora_states"]["encoder"]
     load_global_lora_state(model, global_lora_states)
 
-    local_lora_states = fed_ckpt["client_local_lora_states"]["encoder"][client_id]
-
-    if client_id != -1 and local_lora_states is not None:
-        load_local_lora_state(model, local_lora_states)
+    if client_id != -1 and fed_ckpt["client_local_lora_states"]["encoder"][client_id] is not None:
+        load_local_lora_state(model, fed_ckpt["client_local_lora_states"]["encoder"][client_id])
     elif client_id == -1:
         logger.info("No input client; Using global only")
     else:
