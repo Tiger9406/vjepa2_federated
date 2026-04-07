@@ -6,7 +6,11 @@ import src.models.vision_transformer as vit
 from evals.video_classification_frozen.modelcustom.vit_encoder_multiclip import (
     ClipAggregation,
 )
-from src.models.utils.lora import inject_lora, load_global_lora_state
+from src.models.utils.lora import (
+    inject_lora,
+    load_global_lora_state,
+    load_local_lora_state,
+)
 
 logger = logging.getLogger()
 
@@ -29,6 +33,7 @@ def init_module(
     base_ckp_key = enc_kwargs.pop("checkpoint_key", "target_encoder")
     lora_r = enc_kwargs.pop("lora_r", 8)
     lora_alpha = enc_kwargs.pop("lora_alpha", 16.0)
+    client_id = enc_kwargs.pop("client_id", -1)
 
     model = vit.__dict__[enc_model_name](
         img_size=resolution, num_frames=frames_per_clip, **enc_kwargs
@@ -55,6 +60,15 @@ def init_module(
     # load global lora states
     global_lora_states = fed_ckpt["global_lora_states"]["encoder"]
     load_global_lora_state(model, global_lora_states)
+
+    local_lora_states = fed_ckpt["client_local_lora_states"]["encoder"][client_id]
+
+    if client_id != -1 and local_lora_states is not None:
+        load_local_lora_state(model, local_lora_states)
+    elif client_id == -1:
+        logger.info("No input client; Using global only")
+    else:
+        logger.warning(f"No local LoRA state in client {client_id}; Using global only.")
 
     # wrap for downstream training
     model = ClipAggregation(
