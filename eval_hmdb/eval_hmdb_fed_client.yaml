@@ -16,7 +16,7 @@ model_kwargs:
       base_pretrained_path: /content/drive/MyDrive/vjepa_run/latest.pt
       lora_r: 8
       lora_alpha: 16.0
-      "client_id": 5
+      client_id: 5
       
   wrapper_kwargs: {}
 
@@ -26,7 +26,7 @@ experiment:
     dataset_type: "VideoDataset"
     dataset_train: "/dev/shm/vjepa2_federated/hmdb51_train_split1.csv"
     dataset_val: "/dev/shm/vjepa2_federated/hmdb51_val_split1.csv"
-    num_classes: 101
+    num_classes: 51
     resolution: 224
     frames_per_clip: 16
     frame_step: 4
