@@ -1,0 +1,46 @@
+eval_name: "video_classification_frozen"
+folder: "/content/drive/MyDrive/vjepa/fed_eval_vjepa_ucf101_checkpoints"
+resume_checkpoint: true
+nodes: 1
+tasks_per_node: 1
+cpus_per_task: 4
+
+model_kwargs:
+  module_name: "evals.video_classification_frozen.modelcustom.vit_encoder_multiclip_lora"
+  pretrain_kwargs:
+    encoder:
+      model_name: "vit_small"
+      checkpoint_key: "target_encoder"
+      
+      # pass via command line: "/content/drive/MyDrive/vjepa/fed_run/fed_latest.pt"
+      base_pretrained_path: /content/drive/MyDrive/vjepa_run/latest.pt
+      lora_r: 8
+      lora_alpha: 16.0
+      "client_id": 1
+      
+  wrapper_kwargs: {}
+
+
+experiment:
+  data:
+    dataset_type: "VideoDataset"
+    dataset_train: "/content/vjepa2_federated/eval_ucf101/ucf101_train.csv"
+    dataset_val: "/content/vjepa2_federated/eval_ucf101/ucf101_val.csv"
+    num_classes: 101
+    resolution: 224
+    frames_per_clip: 16
+    frame_step: 4
+    num_segments: 1
+    num_views_per_segment: 1
+    num_workers: 4
+  
+  classifier:
+    num_probe_blocks: 1
+    num_heads: 6
+  
+  optimization:
+    batch_size: 64
+    num_epochs: 50
+    use_bfloat16: true
+    multihead_kwargs:
+      - {lr: 0.001, weight_decay: 0.0, final_weight_decay: 0.0, start_lr: 0.0001, final_lr: 0.0, warmup: 0.1}
