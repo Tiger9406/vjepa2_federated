@@ -504,7 +504,7 @@ def main(args, resume_preempt=False):
                 "Ctx_Fwd_ms", "Loss_ms", "Bwd_ms", "Ema_ms"
             ])
 
-    for round_idx in range(num_rounds):
+    for round_idx in range(start_round, num_rounds):
         round_start = time.perf_counter()
         logger.info(f"=== Round {round_idx + 1}/{num_rounds} ===")
         # global LoRA states collected from each client, to be fedavg'd or scaffolded
