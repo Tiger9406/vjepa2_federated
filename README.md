@@ -10,6 +10,10 @@ You can run the full pipeline, from training to evaluation on UCF101 and HMDB, i
 * **[UCF101 Evaluation](https://colab.research.google.com/drive/1TE5qEGL2hHllx8DEk2Fu8r-BOG3Sw536?usp=sharing)**
 * **[HMDB51 Evaluation](https://colab.research.google.com/drive/1IwMS68RwEJEjli6yi1npbGVthdJcjDHd?usp=sharing)**
 
+## Huggingface Repo
+
+**[Huggingface](https://huggingface.co/datasets/tiger9406/fed-client-dataset/tree/main)** repo of preprocessed data and pretrained backbone (latest.pt) and fed-trained global and client-specific weights (fed_latest.pt)
+
 ---
 
 ## Key Features & Components
