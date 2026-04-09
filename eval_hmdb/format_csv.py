@@ -10,6 +10,7 @@ def sanitize(name):
 
 def prepare_hmdb51(split_num=1):
     current_dir = os.getcwd()
+    current_dir = os.path.join(current_dir, "eval_hmdb")
     video_dir = os.path.join(current_dir, "raw_hmdb", "hmdb51")
     split_dir = os.path.join(current_dir, "testTrainMulti_7030_splits")
 

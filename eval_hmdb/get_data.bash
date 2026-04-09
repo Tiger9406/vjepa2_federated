@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-LOCAL_DIR="."
+LOCAL_DIR="./eval_hmdb"
 
 mkdir -p "$LOCAL_DIR"
 

@@ -1,5 +1,5 @@
 eval_name: "video_classification_frozen"
-folder: "/content/drive/MyDrive/vjepa/fed_eval_vjepa_hmdb_checkpoints"
+folder: "/content/vjepa2_federated/eval_hmdb/fed_eval_vjepa_hmdb_checkpoints"
 resume_checkpoint: true
 nodes: 1
 tasks_per_node: 1
@@ -12,8 +12,7 @@ model_kwargs:
       model_name: "vit_small"
       checkpoint_key: "target_encoder"
       
-      # pass via command line: "/content/drive/MyDrive/vjepa/fed_run/fed_latest.pt"
-      base_pretrained_path: /content/drive/MyDrive/vjepa_run/latest.pt
+      base_pretrained_path: /content/vjepa2_federated/eval_hmdb/latest.pt
       lora_r: 8
       lora_alpha: 16.0
       client_id: 5
@@ -24,8 +23,8 @@ model_kwargs:
 experiment:
   data:
     dataset_type: "VideoDataset"
-    dataset_train: "/dev/shm/vjepa2_federated/hmdb51_train_split1.csv"
-    dataset_val: "/dev/shm/vjepa2_federated/hmdb51_val_split1.csv"
+    dataset_train: "/content/vjepa2_federated/eval_hmdb/hmdb51_train_split1.csv"
+    dataset_val: "/content/vjepa2_federated/eval_hmdb/hmdb51_val_split1.csv"
     num_classes: 51
     resolution: 224
     frames_per_clip: 16

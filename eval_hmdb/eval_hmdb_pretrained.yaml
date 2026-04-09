@@ -1,29 +1,24 @@
 eval_name: "video_classification_frozen"
-folder: "/content/vjepa2_federated/eval_ucf101/fed_eval_ucf101_checkpoints"
+folder: "/content/vjepa2_federated/eval_hmdb/pretrained_hmdb_checkpoints"
 resume_checkpoint: true
+# hardware setup; this is L4
 nodes: 1
 tasks_per_node: 1
 cpus_per_task: 4
 
 model_kwargs:
-  module_name: "evals.video_classification_frozen.modelcustom.vit_encoder_multiclip_lora"
+  module_name: "evals.video_classification_frozen.modelcustom.vit_encoder_multiclip"
   pretrain_kwargs:
     encoder:
       model_name: "vit_small"
       checkpoint_key: "target_encoder"
-      
-      base_pretrained_path: /content/vjepa2_federated/eval_ucf101/latest.pt
-      lora_r: 8
-      lora_alpha: 16.0
-      
   wrapper_kwargs: {}
-
 
 experiment:
   data:
     dataset_type: "VideoDataset"
-    dataset_train: "/content/vjepa2_federated/eval_ucf101/ucf101_train.csv"
-    dataset_val: "/content/vjepa2_federated/eval_ucf101/ucf101_val.csv"
+    dataset_train: "/content/vjepa2_federated/eval_hmdb/hmdb51_train_split1.csv"
+    dataset_val: "/content/vjepa2_federated/eval_hmdb/hmdb51_val_split1.csv"
     num_classes: 101
     resolution: 224
     frames_per_clip: 16
